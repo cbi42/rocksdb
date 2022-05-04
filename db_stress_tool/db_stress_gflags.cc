@@ -7,6 +7,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <gflags/gflags.h>
 #ifdef GFLAGS
 #include "db_stress_tool/db_stress_common.h"
 
@@ -726,6 +727,10 @@ DEFINE_int32(compression_parallel_threads, 1,
 DEFINE_uint64(compression_max_dict_buffer_bytes, 0,
               "Buffering limit for SST file data to sample for dictionary "
               "compression.");
+
+DEFINE_bool(compression_use_zstd_dict_trainer, true,
+              "Use zstd's trainer to generate dictionary. If the options is false, "
+              "zstd's finalizeDictionary() API is used to generate dictionary.");
 
 DEFINE_string(bottommost_compression_type, "disable",
               "Algorithm to use to compress bottommost level of the database. "

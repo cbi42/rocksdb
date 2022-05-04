@@ -7,6 +7,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <gflags/gflags.h>
 #ifdef GFLAGS
 #ifdef NUMA
 #include <numa.h>
@@ -1200,6 +1201,11 @@ DEFINE_uint64(compression_max_dict_buffer_bytes,
               ROCKSDB_NAMESPACE::CompressionOptions().max_dict_buffer_bytes,
               "Maximum bytes to buffer to collect samples for dictionary.");
 
+DEFINE_bool(compression_use_zstd_dict_trainer,
+              ROCKSDB_NAMESPACE::CompressionOptions().use_zstd_dict_trainer,
+              "If true, use ZSTD_TrainDictionary() to create dictionary, else"
+              "use ZSTD_FinalizeDictionary() to create dictionary");
+
 static bool ValidateTableCacheNumshardbits(const char* flagname,
                                            int32_t value) {
   if (0 >= value || value >= 20) {
@@ -1759,7 +1765,7 @@ class RandomGenerator {
     // large enough to serve all typical value sizes we want to write.
     Random rnd(301);
     std::string piece;
-    while (data_.size() < (unsigned)std::max(1048576, max_value_size)) {
+    while (data_.size() < (unsigned)std::max(16384, max_value_size)) {
       // Add a short fragment that is as compressible as specified
       // by FLAGS_compression_ratio.
       test::CompressibleString(&rnd, FLAGS_compression_ratio, 100, &piece);
@@ -3876,6 +3882,8 @@ class Benchmark {
         FLAGS_compression_parallel_threads;
     options.compression_opts.max_dict_buffer_bytes =
         FLAGS_compression_max_dict_buffer_bytes;
+    options.compression_opts.use_zstd_dict_trainer =
+        FLAGS_compression_use_zstd_dict_trainer;
 
     options.max_open_files = FLAGS_open_files;
     if (FLAGS_cost_write_buffer_to_cache || FLAGS_db_write_buffer_size != 0) {

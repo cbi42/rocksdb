@@ -1885,23 +1885,34 @@ void BlockBasedTableBuilder::EnterUnbuffered() {
   // final data block flushed, now we can generate dictionary from the samples.
   // OK if compression_dict_samples is empty, we'll just get empty dictionary.
   std::string dict;
+  fprintf(stderr, "use %d zstd trainer \n", r->compression_opts.use_zstd_dict_trainer);
   if (r->compression_opts.zstd_max_train_bytes > 0) {
-    dict = ZSTD_TrainDictionary(compression_dict_samples,
+    if (r->compression_opts.use_zstd_dict_trainer) {
+      fprintf(stderr, "Train zstd version: %d\n", ZSTD_VERSION_NUMBER);
+      dict = ZSTD_TrainDictionary(compression_dict_samples,
                                 compression_dict_sample_lens,
                                 r->compression_opts.max_dict_bytes);
-  } else if (rep_->compression_type == kZSTD) {
-    // use ZSTD_finalizeDictionary API instead of raw content dictionary
-    std::string samples;
-    std::vector<size_t> sample_lens;
-    for (size_t i = 0; i < r->data_block_buffers.size(); ++i) {
-      samples.append(r->data_block_buffers[i]);
-      sample_lens.emplace_back(r->data_block_buffers[i].size());
-    }
-    // compression_dict_samples is the starting and fallback dicitonary content
-    dict = ZSTD_FinalizeDictionary(
-        samples, sample_lens, compression_dict_samples,
+    } else {
+      fprintf(stderr, "zstd version: %d\n", ZSTD_VERSION_NUMBER);
+      dict = ZSTD_FinalizeDictionary(
+        compression_dict_samples, compression_dict_sample_lens,
         r->compression_opts.max_dict_bytes, r->compression_opts.level);
-  } else {
+    }
+  }
+  // } else if (rep_->compression_type == kZSTD) {
+    // use ZSTD_finalizeDictionary API instead of raw content dictionary
+    // std::string samples;
+    // std::vector<size_t> sample_lens;
+    // for (size_t i = 0; i < r->data_block_buffers.size(); ++i) {
+    //   samples.append(r->data_block_buffers[i]);
+    //   sample_lens.emplace_back(r->data_block_buffers[i].size());
+    // }
+    // compression_dict_samples is the starting and fallback dicitonary content
+    // dict = ZSTD_FinalizeDictionary(
+    //     compression_dict_samples, compression_dict_sample_lens, compression_dict_samples,
+    //     r->compression_opts.max_dict_bytes, r->compression_opts.level);
+  // }
+   else {
     dict = std::move(compression_dict_samples);
   }
   r->compression_dict.reset(new CompressionDict(dict, r->compression_type,
@@ -1936,7 +1947,7 @@ void BlockBasedTableBuilder::EnterUnbuffered() {
     }
 
     auto& data_block = r->data_block_buffers[i];
-
+// V=1 ROCKSDB_NO_FBCODE=1 EXTRA_CXXFLAGS="-I/data/users/changyubi/install/include/zstd-1.5.2/" EXTRA_LDFLAGS="-L/data/users/changyubi/install/lib/ -lzstd" make -j32 db_bench```
     if (r->IsParallelCompressionEnabled()) {
       Slice first_key_in_next_block;
       const Slice* first_key_in_next_block_ptr = &first_key_in_next_block;

@@ -51,11 +51,12 @@ default_params = {
             ["none", "snappy", "zlib", "lz4", "lz4hc", "xpress", "zstd"]),
     "checksum_type" : lambda: random.choice(["kCRC32c", "kxxHash", "kxxHash64", "kXXH3"]),
     "compression_max_dict_bytes": lambda: 16384 * random.randint(0, 1),
-    "compression_zstd_max_train_bytes": lambda: 65536 * random.randint(0, 1),
+    "compression_zstd_max_train_bytes": lambda: 65536 * random.randint(0, 1),"
     # Disabled compression_parallel_threads as the feature is not stable
     # lambda: random.choice([1] * 9 + [4])
     "compression_parallel_threads": 1,
     "compression_max_dict_buffer_bytes": lambda: (1 << random.randint(0, 40)) - 1,
+    "compression_use_zstd_dict_trainer": lambda: random.randint(0, 1),
     "clear_column_family_one_in": 0,
     "compact_files_one_in": 1000000,
     "compact_range_one_in": 1000000,
