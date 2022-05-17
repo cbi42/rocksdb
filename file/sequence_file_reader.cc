@@ -39,20 +39,28 @@ IOStatus SequentialFileReader::Create(
 IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
                                     Env::IOPriority rate_limiter_priority) {
   IOStatus io_s;
-  uint64_t filesize;
-  IOOptions io_opts;
-  // Need to get file size for each read since new content might be added to
-  // file after last read
-  io_s = file_->GetFileSize(filesize);
-  if (!io_s.ok()) {
-    return io_s;
+  // Refresh file size when rate limiter is in effect and read is beyong end of
+  // file according to the latested recorded file size (default is 0). Need to
+  // fresh file size since new content might be added to file after the last
+  // read.
+  size_t offset = offset_.load();
+  if (rate_limiter_priority != Env::IO_TOTAL && rate_limiter_ != nullptr &&
+      rate_limiter_->IsRateLimited(RateLimiter::OpType::kRead) &&
+      offset + n > filesize_.load()) {
+    uint64_t filesize;
+    io_s = file_->GetFileSize(filesize);
+    if (!io_s.ok()) {
+      return io_s;
+    }
+    assert(filesize >= offset);
+    filesize_.store(filesize);
+    // Cap the bytes limit to number of remaining bytes in the file
+    n = std::min(n, static_cast<size_t>(filesize) - offset);
   }
-  // Cap the bytes limit to number of remaining bytes in the file
-  n = std::min(n, static_cast<size_t>(filesize) - offset_);
+
   if (use_direct_io()) {
 #ifndef ROCKSDB_LITE
-
-    size_t offset = offset_.fetch_add(n);
+    offset = offset_.fetch_add(n);
     size_t alignment = file_->GetRequiredBufferAlignment();
     size_t aligned_offset = TruncateToPageBoundary(alignment, offset);
     size_t offset_advance = offset - aligned_offset;
@@ -67,7 +75,8 @@ IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
       if (rate_limiter_priority != Env::IO_TOTAL && rate_limiter_ != nullptr) {
         allowed = rate_limiter_->RequestToken(
             buf.Capacity() - buf.CurrentSize(), buf.Alignment(),
-            rate_limiter_priority, nullptr, RateLimiter::OpType::kRead);
+            rate_limiter_priority, nullptr /* stats */,
+            RateLimiter::OpType::kRead);
       } else {
         assert(buf.CurrentSize() == 0);
         allowed = size;
@@ -80,9 +89,9 @@ IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
         orig_offset = aligned_offset + buf.CurrentSize();
         start_ts = FileOperationInfo::StartNow();
       }
-      io_s =
-          file_->PositionedRead(aligned_offset + buf.CurrentSize(), allowed,
-                                IOOptions(), &tmp, buf.Destination(), nullptr);
+      io_s = file_->PositionedRead(aligned_offset + buf.CurrentSize(), allowed,
+                                   IOOptions(), &tmp, buf.Destination(),
+                                   nullptr /* dbg */);
       if (ShouldNotifyListeners()) {
         auto finish_ts = FileOperationInfo::FinishNow();
         NotifyOnFileReadFinish(orig_offset, tmp.size(), start_ts, finish_ts,
@@ -114,9 +123,9 @@ IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
     while (read < n) {
       size_t allowed;
       if (rate_limiter_priority != Env::IO_TOTAL && rate_limiter_ != nullptr) {
-        allowed = rate_limiter_->RequestToken(n - read, 0 /* alignment */,
-                                              rate_limiter_priority, nullptr,
-                                              RateLimiter::OpType::kRead);
+        allowed = rate_limiter_->RequestToken(
+            n - read, 0 /* alignment */, rate_limiter_priority,
+            nullptr /* stats */, RateLimiter::OpType::kRead);
       } else {
         allowed = n;
       }
@@ -127,10 +136,11 @@ IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
       }
 #endif
       Slice tmp;
-      io_s = file_->Read(allowed, IOOptions(), &tmp, scratch + read, nullptr);
+      io_s = file_->Read(allowed, IOOptions(), &tmp, scratch + read,
+                         nullptr /* dbg */);
 #ifndef ROCKSDB_LITE
-      size_t offset = offset_.fetch_add(tmp.size());
       if (ShouldNotifyListeners()) {
+        offset = offset_.fetch_add(tmp.size());
         auto finish_ts = FileOperationInfo::FinishNow();
         NotifyOnFileReadFinish(offset, tmp.size(), start_ts, finish_ts, io_s);
       }

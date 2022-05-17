@@ -740,7 +740,7 @@ class SequentialFile {
   }
 
   virtual Status GetFileSize(uint64_t& /* size */) const {
-    return Status::NotSupported("GetFileSize");
+    return Status::NotSupported("SequentialFile::GetFileSize() not supported.");
   }
   // If you're adding methods here, remember to add them to
   // SequentialFileWrapper too.

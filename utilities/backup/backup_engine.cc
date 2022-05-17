@@ -2040,8 +2040,8 @@ IOStatus BackupEngineImpl::CopyOrCreateFile(
     // Return back current temperature in FileSystem
     *src_temperature = src_file->GetTemperature();
 
-    src_reader.reset(new SequentialFileReader(std::move(src_file), src, nullptr,
-                                              {}, rate_limiter));
+    src_reader.reset(new SequentialFileReader(
+        std::move(src_file), src, nullptr /* io_tracer */, {}, rate_limiter));
     buf.reset(new char[buf_size]);
   }
 
@@ -2077,9 +2077,14 @@ IOStatus BackupEngineImpl::CopyOrCreateFile(
     io_s = dest_writer->Append(data);
 
     if (rate_limiter != nullptr) {
+      if (!src.empty()) {
+        rate_limiter->Request(data.size(), Env::IO_LOW, nullptr /* stats */,
+                              RateLimiter::OpType::kWrite);
+      } else {
         LoopRateLimitRequestHelper(data.size(), rate_limiter, Env::IO_LOW,
                                    nullptr /* stats */,
                                    RateLimiter::OpType::kWrite);
+      }
     }
     while (*bytes_toward_next_callback >=
            options_.callback_trigger_interval_size) {
@@ -2768,9 +2773,9 @@ IOStatus BackupEngineImpl::BackupMeta::LoadFromFile(
 
   std::unique_ptr<LineFileReader> backup_meta_reader;
   {
-    IOStatus io_s =
-        LineFileReader::Create(fs_, meta_filename_, FileOptions(),
-                               &backup_meta_reader, nullptr, rate_limiter);
+    IOStatus io_s = LineFileReader::Create(fs_, meta_filename_, FileOptions(),
+                                           &backup_meta_reader,
+                                           nullptr /* dbg */, rate_limiter);
     if (!io_s.ok()) {
       return io_s;
     }

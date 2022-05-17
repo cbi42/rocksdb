@@ -43,6 +43,9 @@ class LineFileReader {
   // the line to `out`, without delimiter, or returning false on failure. You
   // must check GetStatus() to determine whether the failure was just
   // end-of-file (OK status) or an I/O error (another status).
+  // Caller can set rate limiting priority other than the default value
+  // Env::IO_TOTAL and the rate limiter provided in call to Create() will be
+  // charged at the specified priority.
   bool ReadLine(std::string* out,
                 Env::IOPriority rate_limiter_priority = Env::IO_TOTAL);
 

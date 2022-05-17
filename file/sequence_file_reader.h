@@ -58,6 +58,7 @@ class SequentialFileReader {
   std::atomic<size_t> offset_{0};  // read offset
   std::vector<std::shared_ptr<EventListener>> listeners_{};
   RateLimiter* rate_limiter_;
+  std::atomic<uint64_t> filesize_;
 
  public:
   explicit SequentialFileReader(
