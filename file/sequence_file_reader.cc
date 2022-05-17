@@ -39,28 +39,9 @@ IOStatus SequentialFileReader::Create(
 IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
                                     Env::IOPriority rate_limiter_priority) {
   IOStatus io_s;
-  // Refresh file size when rate limiter is in effect and read is beyong end of
-  // file according to the latested recorded file size (default is 0). Need to
-  // fresh file size since new content might be added to file after the last
-  // read.
-  size_t offset = offset_.load();
-  if (rate_limiter_priority != Env::IO_TOTAL && rate_limiter_ != nullptr &&
-      rate_limiter_->IsRateLimited(RateLimiter::OpType::kRead) &&
-      offset + n > filesize_.load()) {
-    uint64_t filesize;
-    io_s = file_->GetFileSize(filesize);
-    if (!io_s.ok()) {
-      return io_s;
-    }
-    assert(filesize >= offset);
-    filesize_.store(filesize);
-    // Cap the bytes limit to number of remaining bytes in the file
-    n = std::min(n, static_cast<size_t>(filesize) - offset);
-  }
-
   if (use_direct_io()) {
 #ifndef ROCKSDB_LITE
-    offset = offset_.fetch_add(n);
+    size_t offset = offset_.fetch_add(n);
     size_t alignment = file_->GetRequiredBufferAlignment();
     size_t aligned_offset = TruncateToPageBoundary(alignment, offset);
     size_t offset_advance = offset - aligned_offset;
@@ -140,7 +121,7 @@ IOStatus SequentialFileReader::Read(size_t n, Slice* result, char* scratch,
                          nullptr /* dbg */);
 #ifndef ROCKSDB_LITE
       if (ShouldNotifyListeners()) {
-        offset = offset_.fetch_add(tmp.size());
+        size_t offset = offset_.fetch_add(tmp.size());
         auto finish_ts = FileOperationInfo::FinishNow();
         NotifyOnFileReadFinish(offset, tmp.size(), start_ts, finish_ts, io_s);
       }
