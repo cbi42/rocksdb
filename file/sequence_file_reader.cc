@@ -16,7 +16,6 @@
 #include "monitoring/histogram.h"
 #include "monitoring/iostats_context_imp.h"
 #include "port/port.h"
-#include "rocksdb/file_system.h"
 #include "test_util/sync_point.h"
 #include "util/aligned_buffer.h"
 #include "util/random.h"
@@ -251,10 +250,6 @@ class ReadaheadSequentialFile : public FSSequentialFile {
   }
 
   bool use_direct_io() const override { return file_->use_direct_io(); }
-
-  IOStatus GetFileSize(uint64_t& size) const override {
-    return file_->GetFileSize(size);
-  }
 
  private:
   // Tries to read from buffer_ n bytes. If anything was read from the cache, it

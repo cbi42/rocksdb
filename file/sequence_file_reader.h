@@ -58,7 +58,6 @@ class SequentialFileReader {
   std::atomic<size_t> offset_{0};  // read offset
   std::vector<std::shared_ptr<EventListener>> listeners_{};
   RateLimiter* rate_limiter_;
-  std::atomic<uint64_t> filesize_;
 
  public:
   explicit SequentialFileReader(
@@ -97,17 +96,17 @@ class SequentialFileReader {
   static IOStatus Create(const std::shared_ptr<FileSystem>& fs,
                          const std::string& fname, const FileOptions& file_opts,
                          std::unique_ptr<SequentialFileReader>* reader,
-                         IODebugContext* dbg,
-                         RateLimiter* rate_limiter);
+                         IODebugContext* dbg, RateLimiter* rate_limiter);
 
   SequentialFileReader(const SequentialFileReader&) = delete;
   SequentialFileReader& operator=(const SequentialFileReader&) = delete;
 
   // `rate_limiter_priority` is used to charge the internal rate limiter when
   // enabled. The special value `Env::IO_TOTAL` makes this operation bypass the
-  // rate limiter. The amount charged to the internal rate limiter is n, even when
-  // less than n bytes are read (e.g. at end of file). To avoid overcharging the
-  // rate limiter, the caller can use file size to cap n to read until end of file.
+  // rate limiter. The amount charged to the internal rate limiter is n, even
+  // when less than n bytes are read (e.g. at end of file). To avoid
+  // overcharging the rate limiter, the caller can use file size to cap n to
+  // read until end of file.
   IOStatus Read(size_t n, Slice* result, char* scratch,
                 Env::IOPriority rate_limiter_priority);
 

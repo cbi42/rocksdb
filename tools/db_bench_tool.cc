@@ -7,9 +7,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#include <gflags/gflags.h>
-
-#include "rocksdb/utilities/backup_engine.h"
 #ifdef GFLAGS
 #ifdef NUMA
 #include <numa.h>
@@ -63,6 +60,7 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/stats_history.h"
 #include "rocksdb/table.h"
+#include "rocksdb/utilities/backup_engine.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
 #include "rocksdb/utilities/options_type.h"
@@ -8252,8 +8250,6 @@ class Benchmark {
     Status s =
         BackupEngineReadOnly::Open(FLAGS_env, *engine_options, &backup_engine);
     assert(s.ok());
-    // std::string restore_dir =
-    // FLAGS_db + "/restore_" + std::to_string(thread->rand.Next());
     s = backup_engine->RestoreDBFromLatestBackup(FLAGS_restore_dir,
                                                  FLAGS_restore_dir);
     assert(s.ok());
