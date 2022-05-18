@@ -2579,7 +2579,7 @@ void DumpWalFile(Options options, std::string wal_file, bool print_header,
   FileOptions soptions(options);
   std::unique_ptr<SequentialFileReader> wal_file_reader;
   Status status = SequentialFileReader::Create(fs, wal_file, soptions,
-                                               &wal_file_reader, nullptr);
+                                               &wal_file_reader, nullptr /* dbg */, nullptr /* rate_limiter */);
   if (!status.ok()) {
     if (exec_state) {
       *exec_state = LDBCommandExecuteResult::Failed("Failed to open WAL file " +

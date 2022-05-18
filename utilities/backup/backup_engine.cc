@@ -1385,7 +1385,7 @@ IOStatus BackupEngineImpl::CreateNewBackupWithMetadata(
           uint64_t size_bytes = 0;
           IOStatus io_st;
           if (type == kTableFile || type == kBlobFile) {
-            // TODO: can just use size_limit_bytes instead?
+            // TODO: can we just use size_limit_bytes and remove this call?
             io_st = db_fs_->GetFileSize(src_dirname + "/" + fname, io_options_,
                                         &size_bytes, nullptr);
           }
@@ -2358,7 +2358,7 @@ IOStatus BackupEngineImpl::ReadFileAndComputeChecksum(
   file_options.temperature = src_temperature;
   RateLimiter* rate_limiter = options_.backup_rate_limiter.get();
   IOStatus io_s = SequentialFileReader::Create(
-      src_fs, src, file_options, &src_reader, nullptr, rate_limiter);
+      src_fs, src, file_options, &src_reader, nullptr /* dbg */, rate_limiter);
   if (!io_s.ok()) {
     return io_s;
   }
