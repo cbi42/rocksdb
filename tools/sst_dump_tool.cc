@@ -109,6 +109,9 @@ void print_help(bool to_stderr) {
 
     --compression_max_dict_buffer_bytes=<int64_t>
       Limit on buffer size from which we collect samples for dictionary generation.
+
+    --nocompression_use_zstd_dict_trainer
+      Use zstd's finalizeDictionary() API instead of zstd's dictionary trainer to generate dictionary.
 )");
 }
 
@@ -174,6 +177,8 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
       ROCKSDB_NAMESPACE::CompressionOptions().zstd_max_train_bytes;
   uint64_t compression_max_dict_buffer_bytes =
       ROCKSDB_NAMESPACE::CompressionOptions().max_dict_buffer_bytes;
+  bool compression_use_zstd_dict_trainer =
+      ROCKSDB_NAMESPACE::CompressionOptions().use_zstd_dict_trainer;
 
   int64_t tmp_val;
 
@@ -297,6 +302,8 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
         return 1;
       }
       compression_max_dict_buffer_bytes = static_cast<uint64_t>(tmp_val);
+    } else if (strcmp(argv[i], "--nocompression_use_zstd_dict_trainer") == 0) {
+      compression_use_zstd_dict_trainer = false;
     } else if (strcmp(argv[i], "--help") == 0) {
       print_help(/*to_stderr*/ false);
       return 0;
@@ -425,7 +432,8 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
           set_block_size ? block_size : 16384,
           compression_types.empty() ? kCompressions : compression_types,
           compress_level_from, compress_level_to, compression_max_dict_bytes,
-          compression_zstd_max_train_bytes, compression_max_dict_buffer_bytes);
+          compression_zstd_max_train_bytes, compression_max_dict_buffer_bytes,
+          compression_use_zstd_dict_trainer);
       if (!st.ok()) {
         fprintf(stderr, "Failed to recompress: %s\n", st.ToString().c_str());
         exit(1);

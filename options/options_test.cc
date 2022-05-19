@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cinttypes>
 #include <cstring>
+#include <gtest/gtest.h>
 #include <unordered_map>
 
 #include "cache/lru_cache.h"
@@ -17,6 +18,7 @@
 #include "options/options_helper.h"
 #include "options/options_parser.h"
 #include "port/port.h"
+#include "rocksdb/advanced_options.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/convenience.h"
 #include "rocksdb/file_checksum.h"
@@ -68,7 +70,7 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
        "kZSTDNotFinalCompression"},
       {"bottommost_compression", "kLZ4Compression"},
       {"bottommost_compression_opts", "5:6:7:8:10:true"},
-      {"compression_opts", "4:5:6:7:8:true"},
+      {"compression_opts", "4:5:6:7:8:2:true:100:false"},
       {"num_levels", "8"},
       {"level0_file_num_compaction_trigger", "8"},
       {"level0_slowdown_writes_trigger", "9"},
@@ -190,9 +192,10 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.compression_opts.strategy, 6);
   ASSERT_EQ(new_cf_opt.compression_opts.max_dict_bytes, 7u);
   ASSERT_EQ(new_cf_opt.compression_opts.zstd_max_train_bytes, 8u);
-  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads,
-            CompressionOptions().parallel_threads);
+  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads, 2);
   ASSERT_EQ(new_cf_opt.compression_opts.enabled, true);
+  ASSERT_EQ(new_cf_opt.compression_opts.max_dict_buffer_bytes, 100);
+  ASSERT_EQ(new_cf_opt.compression_opts.use_zstd_dict_trainer, false);
   ASSERT_EQ(new_cf_opt.bottommost_compression, kLZ4Compression);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.level, 6);
@@ -202,6 +205,8 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads,
             CompressionOptions().parallel_threads);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled, true);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer,
+            CompressionOptions().use_zstd_dict_trainer);
   ASSERT_EQ(new_cf_opt.num_levels, 8);
   ASSERT_EQ(new_cf_opt.level0_file_num_compaction_trigger, 8);
   ASSERT_EQ(new_cf_opt.level0_slowdown_writes_trigger, 9);
@@ -602,6 +607,8 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(base_cf_opt.compression_opts.parallel_threads,
             dflt.parallel_threads);
   ASSERT_EQ(base_cf_opt.compression_opts.enabled, dflt.enabled);
+  ASSERT_EQ(base_cf_opt.compression_opts.use_zstd_dict_trainer,
+            dflt.use_zstd_dict_trainer);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.window_bits, 4);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.level, 5);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.strategy, 6);
@@ -611,10 +618,12 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.parallel_threads,
             dflt.parallel_threads);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.enabled, dflt.enabled);
+  ASSERT_EQ(base_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer,
+            dflt.use_zstd_dict_trainer);
 
   ASSERT_OK(GetColumnFamilyOptionsFromString(
       config_options, ColumnFamilyOptions(),
-      "compression_opts=4:5:6:7:8:9:true; "
+      "compression_opts=4:5:6:7:8:9:true:10:false; "
       "bottommost_compression_opts=5:6:7:8:9:false",
       &base_cf_opt));
   ASSERT_EQ(base_cf_opt.compression_opts.window_bits, 4);
@@ -624,6 +633,8 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(base_cf_opt.compression_opts.zstd_max_train_bytes, 8u);
   ASSERT_EQ(base_cf_opt.compression_opts.parallel_threads, 9u);
   ASSERT_EQ(base_cf_opt.compression_opts.enabled, true);
+  ASSERT_EQ(base_cf_opt.compression_opts.max_dict_buffer_bytes, 10u);
+  ASSERT_EQ(base_cf_opt.compression_opts.use_zstd_dict_trainer, false);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.level, 6);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.strategy, 7);
@@ -632,6 +643,8 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.parallel_threads,
             dflt.parallel_threads);
   ASSERT_EQ(base_cf_opt.bottommost_compression_opts.enabled, false);
+  ASSERT_EQ(base_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer,
+            dflt.use_zstd_dict_trainer);
 
   ASSERT_OK(
       GetStringFromColumnFamilyOptions(config_options, base_cf_opt, &opts_str));
@@ -644,6 +657,8 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(new_cf_opt.compression_opts.zstd_max_train_bytes, 8u);
   ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads, 9u);
   ASSERT_EQ(new_cf_opt.compression_opts.enabled, true);
+  ASSERT_EQ(base_cf_opt.compression_opts.max_dict_buffer_bytes, 10u);
+  ASSERT_EQ(base_cf_opt.compression_opts.use_zstd_dict_trainer, false);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.level, 6);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.strategy, 7);
@@ -652,15 +667,17 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads,
             dflt.parallel_threads);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled, false);
+  ASSERT_EQ(base_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer,
+            dflt.use_zstd_dict_trainer);
 
   // Test as struct values
   ASSERT_OK(GetColumnFamilyOptionsFromString(
       config_options, ColumnFamilyOptions(),
       "compression_opts={window_bits=5; level=6; strategy=7; max_dict_bytes=8;"
-      "zstd_max_train_bytes=9;parallel_threads=10;enabled=true}; "
+      "zstd_max_train_bytes=9;parallel_threads=10;enabled=true;use_zstd_dict_trainer=false}; "
       "bottommost_compression_opts={window_bits=4; level=5; strategy=6;"
       " max_dict_bytes=7;zstd_max_train_bytes=8;parallel_threads=9;"
-      "enabled=false}; ",
+      "enabled=false;use_zstd_dict_trainer=true}; ",
       &new_cf_opt));
   ASSERT_EQ(new_cf_opt.compression_opts.window_bits, 5);
   ASSERT_EQ(new_cf_opt.compression_opts.level, 6);
@@ -669,6 +686,7 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(new_cf_opt.compression_opts.zstd_max_train_bytes, 9u);
   ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads, 10u);
   ASSERT_EQ(new_cf_opt.compression_opts.enabled, true);
+  ASSERT_EQ(new_cf_opt.compression_opts.use_zstd_dict_trainer, false);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.window_bits, 4);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.level, 5);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.strategy, 6);
@@ -676,6 +694,7 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.zstd_max_train_bytes, 8u);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads, 9u);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled, false);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer, true);
 
   ASSERT_OK(GetColumnFamilyOptionsFromString(
       config_options, base_cf_opt,
@@ -707,6 +726,9 @@ TEST_F(OptionsTest, CompressionOptionsFromString) {
             base_cf_opt.bottommost_compression_opts.parallel_threads);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled,
             base_cf_opt.bottommost_compression_opts.enabled);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer,
+            base_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer);
+
 
   // Test a few individual struct values
   ASSERT_OK(GetColumnFamilyOptionsFromString(
@@ -1351,6 +1373,7 @@ TEST_F(OptionsTest, GetOptionsFromStringTest) {
   ASSERT_EQ(new_options.compression_opts.zstd_max_train_bytes, 0u);
   ASSERT_EQ(new_options.compression_opts.parallel_threads, 1u);
   ASSERT_EQ(new_options.compression_opts.enabled, false);
+  ASSERT_EQ(new_options.compression_opts.use_zstd_dict_trainer, true);
   ASSERT_EQ(new_options.bottommost_compression, kDisableCompressionOption);
   ASSERT_EQ(new_options.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(new_options.bottommost_compression_opts.level, 6);
@@ -1359,6 +1382,7 @@ TEST_F(OptionsTest, GetOptionsFromStringTest) {
   ASSERT_EQ(new_options.bottommost_compression_opts.zstd_max_train_bytes, 0u);
   ASSERT_EQ(new_options.bottommost_compression_opts.parallel_threads, 1u);
   ASSERT_EQ(new_options.bottommost_compression_opts.enabled, false);
+  ASSERT_EQ(new_options.bottommost_compression_opts.use_zstd_dict_trainer, true);
   ASSERT_EQ(new_options.write_buffer_size, 10U);
   ASSERT_EQ(new_options.max_write_buffer_number, 16);
   const auto new_bbto =
@@ -2263,7 +2287,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
        "kZSTDNotFinalCompression"},
       {"bottommost_compression", "kLZ4Compression"},
       {"bottommost_compression_opts", "5:6:7:8:9:true"},
-      {"compression_opts", "4:5:6:7:8:true"},
+      {"compression_opts", "4:5:6:7:8:9:true:10:false"},
       {"num_levels", "8"},
       {"level0_file_num_compaction_trigger", "8"},
       {"level0_slowdown_writes_trigger", "9"},
@@ -2380,9 +2404,10 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.compression_opts.strategy, 6);
   ASSERT_EQ(new_cf_opt.compression_opts.max_dict_bytes, 7u);
   ASSERT_EQ(new_cf_opt.compression_opts.zstd_max_train_bytes, 8u);
-  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads,
-            CompressionOptions().parallel_threads);
+  ASSERT_EQ(new_cf_opt.compression_opts.parallel_threads, 9);
   ASSERT_EQ(new_cf_opt.compression_opts.enabled, true);
+  ASSERT_EQ(new_cf_opt.compression_opts.max_dict_buffer_bytes, 10);
+  ASSERT_EQ(new_cf_opt.compression_opts.use_zstd_dict_trainer, false);
   ASSERT_EQ(new_cf_opt.bottommost_compression, kLZ4Compression);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.level, 6);
@@ -2392,6 +2417,10 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.parallel_threads,
             CompressionOptions().parallel_threads);
   ASSERT_EQ(new_cf_opt.bottommost_compression_opts.enabled, true);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.max_dict_buffer_bytes,
+            CompressionOptions().max_dict_buffer_bytes);
+  ASSERT_EQ(new_cf_opt.bottommost_compression_opts.use_zstd_dict_trainer,
+            CompressionOptions().use_zstd_dict_trainer);
   ASSERT_EQ(new_cf_opt.num_levels, 8);
   ASSERT_EQ(new_cf_opt.level0_file_num_compaction_trigger, 8);
   ASSERT_EQ(new_cf_opt.level0_slowdown_writes_trigger, 9);
@@ -3054,6 +3083,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromStringTest) {
   ASSERT_EQ(new_options.compression_opts.zstd_max_train_bytes, 0u);
   ASSERT_EQ(new_options.compression_opts.parallel_threads, 1u);
   ASSERT_EQ(new_options.compression_opts.enabled, false);
+  ASSERT_EQ(new_options.compression_opts.use_zstd_dict_trainer, true);
   ASSERT_EQ(new_options.bottommost_compression, kDisableCompressionOption);
   ASSERT_EQ(new_options.bottommost_compression_opts.window_bits, 5);
   ASSERT_EQ(new_options.bottommost_compression_opts.level, 6);
@@ -3062,6 +3092,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromStringTest) {
   ASSERT_EQ(new_options.bottommost_compression_opts.zstd_max_train_bytes, 0u);
   ASSERT_EQ(new_options.bottommost_compression_opts.parallel_threads, 1u);
   ASSERT_EQ(new_options.bottommost_compression_opts.enabled, false);
+  ASSERT_EQ(new_options.bottommost_compression_opts.use_zstd_dict_trainer, true);
   ASSERT_EQ(new_options.write_buffer_size, 10U);
   ASSERT_EQ(new_options.max_write_buffer_number, 16);
 
