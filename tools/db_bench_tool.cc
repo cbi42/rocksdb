@@ -1200,6 +1200,11 @@ DEFINE_uint64(compression_max_dict_buffer_bytes,
               ROCKSDB_NAMESPACE::CompressionOptions().max_dict_buffer_bytes,
               "Maximum bytes to buffer to collect samples for dictionary.");
 
+DEFINE_bool(compression_use_zstd_dict_trainer,
+            ROCKSDB_NAMESPACE::CompressionOptions().use_zstd_dict_trainer,
+            "If true, use ZSTD_TrainDictionary() to create dictionary, else"
+            "use ZSTD_FinalizeDictionary() to create dictionary");
+
 static bool ValidateTableCacheNumshardbits(const char* flagname,
                                            int32_t value) {
   if (0 >= value || value >= 20) {
@@ -4309,6 +4314,8 @@ class Benchmark {
         FLAGS_compression_parallel_threads;
     options.compression_opts.max_dict_buffer_bytes =
         FLAGS_compression_max_dict_buffer_bytes;
+    options.compression_opts.use_zstd_dict_trainer =
+        FLAGS_compression_use_zstd_dict_trainer;
     // If this is a block based table, set some related options
     auto table_options =
         options.table_factory->GetOptions<BlockBasedTableOptions>();
