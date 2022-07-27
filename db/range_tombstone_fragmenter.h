@@ -197,6 +197,10 @@ class FragmentedRangeTombstoneIterator : public InternalIterator {
     return tombstones_->total_tombstone_payload_bytes();
   }
 
+  void SeekToCoveringTombstone(const Slice& key);
+
+  void SeekToCoveringSequenceNumber();
+
  private:
   using RangeTombstoneStack = FragmentedRangeTombstoneList::RangeTombstoneStack;
 
@@ -247,7 +251,6 @@ class FragmentedRangeTombstoneIterator : public InternalIterator {
     }
   }
 
-  void SeekToCoveringTombstone(const Slice& key);
   void SeekForPrevToCoveringTombstone(const Slice& key);
   void ScanForwardToVisibleTombstone();
   void ScanBackwardToVisibleTombstone();

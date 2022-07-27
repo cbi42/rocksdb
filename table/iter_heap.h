@@ -8,6 +8,7 @@
 
 #include "db/dbformat.h"
 #include "table/iterator_wrapper.h"
+#include "table/merging_iterator.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -35,6 +36,7 @@ class MinIteratorComparator {
   bool operator()(IteratorWrapper* a, IteratorWrapper* b) const {
     return comparator_->Compare(a->key(), b->key()) > 0;
   }
+
  private:
   const InternalKeyComparator* comparator_;
 };

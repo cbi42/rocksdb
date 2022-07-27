@@ -9,8 +9,10 @@
 
 #pragma once
 
+#include "db/range_tombstone_fragmenter.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/types.h"
+#include "db/range_del_aggregator.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -33,6 +35,7 @@ extern InternalIterator* NewMergingIterator(
     const InternalKeyComparator* comparator, InternalIterator** children, int n,
     Arena* arena = nullptr, bool prefix_seek_mode = false);
 
+// class ChildIter;
 class MergingIterator;
 
 // A builder class to build a merging iterator by adding iterators one by one.
@@ -47,6 +50,15 @@ class MergeIteratorBuilder {
   // Add iter to the merging iterator.
   void AddIterator(InternalIterator* iter);
 
+  // Merging iter is responsible to freeing the range tombstone iter.
+  //  void AddRangeTombstoneIterator(const
+  //  std::shared_ptr<FragmentedRangeTombstoneIterator>& iter); void
+  //  AddRangeTombstoneIterator(FragmentedRangeTombstoneIterator** iter);
+
+//  FragmentedRangeTombstoneIterator** AddRangeTombstoneIterator(
+//      FragmentedRangeTombstoneIterator* iter, InternalKey* smallest = nullptr, InternalKey* largest = nullptr);
+
+  TruncatedRangeDelIterator** AddRangeTombstoneIterator(TruncatedRangeDelIterator* iter);
   // Get arena used to build the merging iterator. It is called one a child
   // iterator needs to be allocated.
   Arena* GetArena() { return arena; }

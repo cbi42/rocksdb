@@ -1756,6 +1756,290 @@ TEST_F(DBRangeDelTest, IteratorRefresh) {
   }
 }
 
+TEST_F(DBRangeDelTest, IteratorReseek) {
+  // Verify that range tombstone trigeered reseek is done in merging iterator.
+  // Test set up:
+  //    memtable has range tombstone [a, b)
+  //    immutable memtable has range tombstone [b, c)
+  //    L0 has one file with range tombstone [c, d)
+  //    L1 has one file with range tombstone [d, e)
+  // Seeking at key a will trigger cascading reseeks at all levels
+  Options options = CurrentOptions();
+  options.compression = kNoCompression;
+  options.memtable_factory.reset(
+      test::NewSpecialSkipListFactory(2 /* num_entries_flush */));
+  options.disable_auto_compactions = true;
+
+  DestroyAndReopen(options);
+  const Snapshot* snapshot = db_->GetSnapshot();
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(3),
+                             Key(4)));
+
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  MoveFilesToLevel(1);
+  ASSERT_EQ(1, NumTableFilesAtLevel(1));
+
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(2),
+                             Key(3)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  ASSERT_EQ(1, NumTableFilesAtLevel(0));
+
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(1),
+                             Key(2)));
+  ASSERT_OK(static_cast_with_check<DBImpl>(db_)->TEST_SwitchMemtable());
+  std::string value;
+  ASSERT_TRUE(dbfull()->GetProperty(db_->DefaultColumnFamily(),
+                                    "rocksdb.num-immutable-mem-table", &value));
+  ASSERT_EQ(1, std::stoi(value));
+
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(0),
+                             Key(1)));
+  // this memtable is still active
+  ASSERT_TRUE(dbfull()->GetProperty(db_->DefaultColumnFamily(),
+                                    "rocksdb.num-immutable-mem-table", &value));
+  ASSERT_EQ(1, std::stoi(value));
+
+  auto iter = db_->NewIterator(ReadOptions());
+  iter->Seek(Key(0));
+  // Reseeked immutable memtable, L0 and L1
+  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 3);
+  delete iter;
+  db_->ReleaseSnapshot(snapshot);
+  //    int GetProperty(int cf, std::string property) {
+  //    std::string value;
+  //    EXPECT_TRUE(dbfull()->GetProperty(handles_[cf], property, &value));
+  //#ifndef CYGWIN
+  //    return std::stoi(value);
+}
+
+TEST_F(DBRangeDelTest, ReseekDuringNext) {
+  // Verify that range tombstone trigeered reseek is done during calls to Next()
+  // in merging iterator. Test set up:
+  //    memtable has: [0, 1) [2, 3)
+  //    L0 has: 2
+  //    L1 has: 1, 2, 3
+  //  Seek at 0 will try to seek at 1 for all child iters
+  // Then Next() will try to seek at 3
+  Options options = CurrentOptions();
+  options.compression = kNoCompression;
+  options.disable_auto_compactions = true;
+
+  DestroyAndReopen(options);
+  // avoid garbage collection range tombstones
+  const Snapshot* snapshot = db_->GetSnapshot();
+  // L1
+  ASSERT_OK(db_->Put(WriteOptions(), Key(1), "foo"));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(2), "foo"));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(3), "foo"));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  MoveFilesToLevel(1);
+  ASSERT_EQ(1, NumTableFilesAtLevel(1));
+
+  // L0
+  ASSERT_OK(db_->Put(WriteOptions(), Key(2), "foo"));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  ASSERT_EQ(1, NumTableFilesAtLevel(0));
+
+  // Memtable
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(0),
+                             Key(1)));
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(2),
+                             Key(3)));
+
+  auto iter = db_->NewIterator(ReadOptions());
+  iter->Seek(Key(0));
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(iter->key().ToString(), Key(1));
+  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 2);
+
+  get_perf_context()->Reset();
+  iter->Next();
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(iter->key().ToString(), Key(3));
+  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 2);
+  // Reseeked immutable memtable, L0 and L1
+
+  delete iter;
+  db_->ReleaseSnapshot(snapshot);
+}
+// TODO: correctness testing, not sure if it belongs to this or merging iter
+// test
+
+TEST_F(DBRangeDelTest, TombstoneFromCurrentLevel) {
+  // Verify that range tombstone trigeered reseek is done during calls to Next()
+  // in merging iterator. Test set up:
+  //    memtable has: [0, 1)
+  //    L0 has: [2, 3), 2
+  //    L1 has: 1, 2, 3
+  //  Seek at 0 will try to seek at 1 for all child iters
+  // Then Next() will try to seek at 3
+  Options options = CurrentOptions();
+  options.compression = kNoCompression;
+  options.disable_auto_compactions = true;
+
+  DestroyAndReopen(options);
+  // avoid garbage collection range tombstones
+  const Snapshot* snapshot = db_->GetSnapshot();
+  // L1
+  ASSERT_OK(db_->Put(WriteOptions(), Key(1), "foo"));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(2), "foo"));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(3), "foo"));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  MoveFilesToLevel(1);
+  ASSERT_EQ(1, NumTableFilesAtLevel(1));
+
+  // L0
+  ASSERT_OK(db_->Put(WriteOptions(), Key(2), "foo"));
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(2),
+                             Key(3)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  ASSERT_EQ(1, NumTableFilesAtLevel(0));
+
+  // Memtable
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(0),
+                             Key(1)));
+
+  auto iter = db_->NewIterator(ReadOptions());
+  iter->Seek(Key(0));
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(iter->key().ToString(), Key(1));
+  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 2);
+
+  get_perf_context()->Reset();
+  iter->Next();
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(iter->key().ToString(), Key(3));
+  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 1);
+  // Reseeked immutable memtable, L0 and L1
+
+  delete iter;
+  db_->ReleaseSnapshot(snapshot);
+}
+
+TEST_F(DBRangeDelTest, TombstoneAcrossFileBoundary) {
+  // Verify that range tombstone across file boundary covers keys from older levels.
+  // in merging iterator. Test set up:
+  //    L1_0 has: 1, 3, [2, 6)         L1_1 has: 5, 7, [2, 6) cut off to [5, 6)? (this is from compaction with L1_0)
+  //    L2 has: 4
+  // We do a seek on 4 which should move the L0 level iterator to L0_1
+  // check if 4 is returned in Next()
+  Options options = CurrentOptions();
+  options.compression = kNoCompression;
+  options.disable_auto_compactions = true;
+  options.target_file_size_base = 2 * 1024;
+  // why do we need this?
+  options.max_compaction_bytes = 2 * 1024;
+
+  DestroyAndReopen(options);
+  // avoid garbage collection range tombstones
+  const Snapshot* snapshot = db_->GetSnapshot();
+
+  Random rnd(301);
+  // L2
+  ASSERT_OK(db_->Put(WriteOptions(), Key(4), rnd.RandomString(1 << 10)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  MoveFilesToLevel(2);
+  ASSERT_EQ(1, NumTableFilesAtLevel(2));
+
+  // L1_1
+  ASSERT_OK(db_->Put(WriteOptions(), Key(5), rnd.RandomString(1 << 10)));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(7), rnd.RandomString(1 << 10)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  ASSERT_EQ(1, NumTableFilesAtLevel(0));
+
+  // L1_0
+  ASSERT_OK(db_->Put(WriteOptions(), Key(1), rnd.RandomString(1 << 10)));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(3), rnd.RandomString(1 << 10)));
+  // TODO: try [2, 5)
+  // Prevent keys being compacted away
+  const Snapshot* snapshot2 = db_->GetSnapshot();
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(2),
+                             Key(6)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  ASSERT_EQ(2, NumTableFilesAtLevel(0));
+  MoveFilesToLevel(1);
+  ASSERT_EQ(2, NumTableFilesAtLevel(1));
+
+  auto iter = db_->NewIterator(ReadOptions());
+  iter->Seek(Key(1));
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(iter->key().ToString(), Key(1));
+  iter->Next();
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(iter->key().ToString(), Key(7));
+  // 1 reseek when key 4 in L2 is covered by [2, 6) from L1 and reseek its level
+  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 1);
+
+  delete iter;
+  db_->ReleaseSnapshot(snapshot);
+  db_->ReleaseSnapshot(snapshot2);
+}
+
+TEST_F(DBRangeDelTest, OlderLevelHasNewerData) {
+  // L1_0 has: 1, 3, [2, 7)   L1_1 has 5, 6 at a newer sequence number than the tombstone in L1_0
+  // Compact L1_1 to L2
+  // Do a Seek() on 3, should not skip over 6 even tho L1 has a tombtone covering up to 7
+  Options options = CurrentOptions();
+  options.compression = kNoCompression;
+  options.disable_auto_compactions = true;
+  // see if sst files are cut properly?
+  // check option documentatino
+  options.target_file_size_base = 3 * 1024;
+  // why do we need this? TODO: with this, L2 range tombstone is truncated, figure out why
+//  options.max_compaction_bytes = 3 * 1024;
+
+  DestroyAndReopen(options);
+  // avoid garbage collection range tombstones
+
+
+  Random rnd(301);
+  // L1_0
+  ASSERT_OK(db_->Put(WriteOptions(), Key(1), rnd.RandomString(4 << 10)));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(3), rnd.RandomString(4 << 10)));
+  const Snapshot* snapshot = db_->GetSnapshot();
+  ASSERT_OK(db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), Key(2), Key(7)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  MoveFilesToLevel(1);
+  ASSERT_EQ(1, NumTableFilesAtLevel(1));
+
+  // L1_1
+  ASSERT_OK(db_->Put(WriteOptions(), Key(5), rnd.RandomString(4 << 10)));
+  ASSERT_OK(db_->Put(WriteOptions(), Key(6), rnd.RandomString(4 << 10)));
+  ASSERT_OK(db_->Flush(FlushOptions()));
+  ASSERT_EQ(1, NumTableFilesAtLevel(0));
+  MoveFilesToLevel(1);
+  // TODO: some how key 5 is compacted into L1_0, not sure why, but does not affect result
+  ASSERT_EQ(2, NumTableFilesAtLevel(1));
+
+  // Do iter sanity check here
+  // Move file to 2
+  // TODO: figure out why tombstone is truncated in L2 file
+  Slice begin(Key(6));
+  EXPECT_OK(dbfull()->TEST_CompactRange(1, &begin, nullptr));
+  ASSERT_EQ(1, NumTableFilesAtLevel(1));
+  ASSERT_EQ(1, NumTableFilesAtLevel(2));
+
+  auto iter = db_->NewIterator(ReadOptions());
+  iter->Seek(Key(3));
+  ASSERT_TRUE(iter->Valid());
+//  ASSERT_EQ(iter->key().ToString(), Key(5));
+//  iter->Next();
+//  ASSERT_TRUE(iter->Valid());
+//  ASSERT_EQ(iter->key().ToString(), Key(6));
+
+
+//  iter->Seek(Key(5));
+//  ASSERT_TRUE(iter->Valid());
+//  ASSERT_EQ(iter->key().ToString(), Key(5));
+//  iter->Next();
+//  ASSERT_TRUE(iter->Valid());
+//  ASSERT_EQ(iter->key().ToString(), Key(6));
+//  // 1 reseek when key 4 in L2 is covered by [2, 6) from L1 and reseek its level
+////  ASSERT_EQ(get_perf_context()->internal_range_del_reseek_count, 1);
+//
+  delete iter;
+  db_->ReleaseSnapshot(snapshot);
+}
 #endif  // ROCKSDB_LITE
 
 }  // namespace ROCKSDB_NAMESPACE

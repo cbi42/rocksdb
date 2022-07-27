@@ -236,7 +236,8 @@ InternalIterator* TableCache::NewIterator(
     TableReaderCaller caller, Arena* arena, bool skip_filters, int level,
     size_t max_file_size_for_l0_meta_pin,
     const InternalKey* smallest_compaction_key,
-    const InternalKey* largest_compaction_key, bool allow_unprepared_value) {
+    const InternalKey* largest_compaction_key, bool allow_unprepared_value,
+    FragmentedRangeTombstoneIterator** range_del_iter) {
   PERF_TIMER_GUARD(new_table_iterator_nanos);
 
   Status s;
@@ -281,26 +282,37 @@ InternalIterator* TableCache::NewIterator(
       *table_reader_ptr = table_reader;
     }
   }
-  if (s.ok() && range_del_agg != nullptr && !options.ignore_range_deletions) {
-    if (range_del_agg->AddFile(fd.GetNumber())) {
-      std::unique_ptr<FragmentedRangeTombstoneIterator> range_del_iter(
-          static_cast<FragmentedRangeTombstoneIterator*>(
-              table_reader->NewRangeTombstoneIterator(options)));
-      if (range_del_iter != nullptr) {
-        s = range_del_iter->status();
-      }
-      if (s.ok()) {
-        const InternalKey* smallest = &file_meta.smallest;
-        const InternalKey* largest = &file_meta.largest;
-        if (smallest_compaction_key != nullptr) {
-          smallest = smallest_compaction_key;
+  if (s.ok() && !options.ignore_range_deletions) {
+    // TODO: think through compaction vs db iter use case
+    if (range_del_iter != nullptr) {
+      *range_del_iter = static_cast<FragmentedRangeTombstoneIterator*>(
+          table_reader->NewRangeTombstoneIterator(options));
+    }
+    if (range_del_agg != nullptr) {
+      if (range_del_agg->AddFile(fd.GetNumber())) {
+        std::unique_ptr<FragmentedRangeTombstoneIterator> new_range_del_iter(
+            static_cast<FragmentedRangeTombstoneIterator*>(
+                table_reader->NewRangeTombstoneIterator(options)));
+        if (new_range_del_iter != nullptr) {
+          s = new_range_del_iter->status();
         }
-        if (largest_compaction_key != nullptr) {
-          largest = largest_compaction_key;
+        if (s.ok()) {
+          const InternalKey* smallest = &file_meta.smallest;
+          const InternalKey* largest = &file_meta.largest;
+          if (smallest_compaction_key != nullptr) {
+            smallest = smallest_compaction_key;
+          }
+          if (largest_compaction_key != nullptr) {
+            largest = largest_compaction_key;
+          }
+          range_del_agg->AddTombstones(std::move(new_range_del_iter), smallest,
+                                       largest);
         }
-        range_del_agg->AddTombstones(std::move(range_del_iter), smallest,
-                                     largest);
       }
+      //    } else if (range_del_iter != nullptr) {
+      // if merge_iter_builder is passed in, we know this file's range tombstone
+      // iter was not added before
+      //    }
     }
   }
 

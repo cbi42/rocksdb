@@ -889,7 +889,8 @@ class LevelIterator final : public InternalIterator {
                 RangeDelAggregator* range_del_agg,
                 const std::vector<AtomicCompactionUnitBoundary>*
                     compaction_boundaries = nullptr,
-                bool allow_unprepared_value = false)
+                bool allow_unprepared_value = false,
+                MergeIteratorBuilder* merge_iter_builder = nullptr)
       : table_cache_(table_cache),
         read_options_(read_options),
         file_options_(file_options),
@@ -907,9 +908,16 @@ class LevelIterator final : public InternalIterator {
         range_del_agg_(range_del_agg),
         pinned_iters_mgr_(nullptr),
         compaction_boundaries_(compaction_boundaries),
-        is_next_read_sequential_(false) {
+        is_next_read_sequential_(false),
+        range_tombstone_iter_(nullptr) {
     // Empty level is not supported.
     assert(flevel_ != nullptr && flevel_->num_files > 0);
+    // This iterator will be lazily initialized AND updated when the level iter
+    // moves to a differnt file
+    if (merge_iter_builder && !read_options.ignore_range_deletions) {
+      range_tombstone_iter_ =
+          merge_iter_builder->AddRangeTombstoneIterator(nullptr);
+    }
   }
 
   ~LevelIterator() override { delete file_iter_.Set(nullptr); }
@@ -1004,13 +1012,17 @@ class LevelIterator final : public InternalIterator {
       largest_compaction_key = (*compaction_boundaries_)[file_index_].largest;
     }
     CheckMayBeOutOfLowerBound();
+    if (range_tombstone_iter_ != nullptr) {
+      // Since we are abount to set a new one
+      delete *range_tombstone_iter_;
+    }
     return table_cache_->NewIterator(
         read_options_, file_options_, icomparator_, *file_meta.file_metadata,
         range_del_agg_, prefix_extractor_,
         nullptr /* don't need reference to table */, file_read_hist_, caller_,
         /*arena=*/nullptr, skip_filters_, level_,
         /*max_file_size_for_l0_meta_pin=*/0, smallest_compaction_key,
-        largest_compaction_key, allow_unprepared_value_);
+        largest_compaction_key, allow_unprepared_value_, range_tombstone_iter_);
   }
 
   // Check if current file being fully within iterate_lower_bound.
@@ -1056,6 +1068,10 @@ class LevelIterator final : public InternalIterator {
   const std::vector<AtomicCompactionUnitBoundary>* compaction_boundaries_;
 
   bool is_next_read_sequential_;
+
+  //  std::shared_ptr<FragmentedRangeTombstoneIterator>* range_tombstone_iter_;
+//  FragmentedRangeTombstoneIterator** range_tombstone_iter_;
+  TruncatedRangeDelIterator** range_tombstone_iter_;
 };
 
 void LevelIterator::Seek(const Slice& target) {
@@ -1208,6 +1224,11 @@ bool LevelIterator::SkipEmptyFileForward() {
     if (file_iter_.iter() != nullptr) {
       file_iter_.SeekToFirst();
     }
+    // We moved to a new SST file partition
+    // Seek range_tombstone_iter_ to reset its !Valid() default state.
+    if (range_tombstone_iter_ != nullptr && *range_tombstone_iter_ != nullptr) {
+      (*range_tombstone_iter_)->SeekToFirst();
+    }
   }
   return seen_empty_file;
 }
@@ -1224,6 +1245,11 @@ void LevelIterator::SkipEmptyFileBackward() {
     InitFileIterator(file_index_ - 1);
     if (file_iter_.iter() != nullptr) {
       file_iter_.SeekToLast();
+    }
+    // We moved to a new SST file partition
+    // Seek range_tombstone_iter_ to reset its !Valid() default state.
+    if (range_tombstone_iter_ != nullptr && *range_tombstone_iter_ != nullptr) {
+      (*range_tombstone_iter_)->SeekToLast();
     }
   }
 }
@@ -1251,6 +1277,12 @@ void LevelIterator::InitFileIterator(size_t new_file_index) {
   if (new_file_index >= flevel_->num_files) {
     file_index_ = new_file_index;
     SetFileIterator(nullptr);
+    // TODO: test this case?
+    // TODO: maybe we want to keep the range tombstone iterator, in case point iterator is exhausted but range tombstones are not
+//    if (range_tombstone_iter_ != nullptr) {
+//      delete *range_tombstone_iter_;
+//      *range_tombstone_iter_ = nullptr;
+//    }
     return;
   } else {
     // If the file iterator shows incomplete, we try it again if users seek
@@ -1680,6 +1712,7 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
   auto* arena = merge_iter_builder->GetArena();
   if (level == 0) {
     // Merge all level zero files together since they may overlap
+    FragmentedRangeTombstoneIterator* iter = nullptr;
     for (size_t i = 0; i < storage_info_.LevelFilesBrief(0).num_files; i++) {
       const auto& file = storage_info_.LevelFilesBrief(0).files[i];
       merge_iter_builder->AddIterator(cfd_->table_cache()->NewIterator(
@@ -1690,7 +1723,10 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
           TableReaderCaller::kUserIterator, arena,
           /*skip_filters=*/false, /*level=*/0, max_file_size_for_l0_meta_pin_,
           /*smallest_compaction_key=*/nullptr,
-          /*largest_compaction_key=*/nullptr, allow_unprepared_value));
+          /*largest_compaction_key=*/nullptr, allow_unprepared_value, &iter));
+      if (!read_options.ignore_range_deletions) {
+        merge_iter_builder->AddRangeTombstoneIterator(iter);
+      }
     }
     if (should_sample) {
       // Count ones for every L0 files. This is done per iterator creation
@@ -1713,7 +1749,8 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
         cfd_->internal_stats()->GetFileReadHist(level),
         TableReaderCaller::kUserIterator, IsFilterSkipped(level), level,
         range_del_agg,
-        /*compaction_boundaries=*/nullptr, allow_unprepared_value));
+        /*compaction_boundaries=*/nullptr, allow_unprepared_value,
+        merge_iter_builder));
   }
 }
 
@@ -5957,6 +5994,7 @@ InternalIterator* VersionSet::MakeInputIterator(
         }
       } else {
         // Create concatenating iterator for the files from this level
+        // Level Iter add to range del aggregator as needed
         list[num++] = new LevelIterator(
             cfd->table_cache(), read_options, file_options_compactions,
             cfd->internal_comparator(), c->input_levels(which),
@@ -5970,6 +6008,7 @@ InternalIterator* VersionSet::MakeInputIterator(
     }
   }
   assert(num <= space);
+  // merging iterator takes a list of child iters
   InternalIterator* result =
       NewMergingIterator(&c->column_family_data()->internal_comparator(), list,
                          static_cast<int>(num));

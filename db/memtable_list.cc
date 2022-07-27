@@ -201,6 +201,24 @@ Status MemTableListVersion::AddRangeTombstoneIterators(
   return Status::OK();
 }
 
+Status MemTableListVersion::AddRangeTombstoneIterators(
+    const ReadOptions& read_opts, Arena* /*arena*/,
+    MergeIteratorBuilder& builder) {
+  // Except for snapshot read, using kMaxSequenceNumber is OK because these
+  // are immutable memtables.
+  SequenceNumber read_seq = read_opts.snapshot != nullptr
+                                ? read_opts.snapshot->GetSequenceNumber()
+                                : kMaxSequenceNumber;
+  for (auto& m : memlist_) {
+    //    std::shared_ptr<FragmentedRangeTombstoneIterator>
+    //    iter(m->NewRangeTombstoneIterator(read_opts, read_seq));
+    //    builder->AddRangeTombstoneIterator(iter);
+    builder.AddRangeTombstoneIterator(
+        m->NewRangeTombstoneIterator(read_opts, read_seq));
+  }
+  return Status::OK();
+}
+
 void MemTableListVersion::AddIterators(
     const ReadOptions& options, std::vector<InternalIterator*>* iterator_list,
     Arena* arena) {

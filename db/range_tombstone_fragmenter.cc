@@ -317,6 +317,17 @@ void FragmentedRangeTombstoneIterator::SeekToCoveringTombstone(
                               upper_bound_, std::greater<SequenceNumber>());
 }
 
+void FragmentedRangeTombstoneIterator::SeekToCoveringSequenceNumber() {
+  if (pos_ == tombstones_->end()) {
+    // All tombstones end before target.
+    seq_pos_ = tombstones_->seq_end();
+    return;
+  }
+  seq_pos_ = std::lower_bound(tombstones_->seq_iter(pos_->seq_start_idx),
+                              tombstones_->seq_iter(pos_->seq_end_idx),
+                              upper_bound_, std::greater<SequenceNumber>());
+}
+
 void FragmentedRangeTombstoneIterator::SeekForPrevToCoveringTombstone(
     const Slice& target) {
   if (tombstones_->empty()) {
@@ -415,8 +426,16 @@ bool FragmentedRangeTombstoneIterator::Valid() const {
 SequenceNumber FragmentedRangeTombstoneIterator::MaxCoveringTombstoneSeqnum(
     const Slice& target_user_key) {
   SeekToCoveringTombstone(target_user_key);
-  return ValidPos() && ucmp_->Compare(start_key(), target_user_key) <= 0 ? seq()
-                                                                         : 0;
+  auto a = ValidPos();
+  if (a) {
+    auto b = ucmp_->Compare(start_key(), target_user_key) <= 0 ? seq() : 0;
+    return b;
+  }
+  return a;
+  //  return ValidPos() && ucmp_->Compare(start_key(), target_user_key) <= 0 ?
+  //  seq()
+  //                                                                         :
+  //                                                                         0;
 }
 
 std::map<SequenceNumber, std::unique_ptr<FragmentedRangeTombstoneIterator>>
