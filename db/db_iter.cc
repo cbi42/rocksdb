@@ -1523,6 +1523,8 @@ void DBIter::SeekToFirst() {
     max_skip_ = std::numeric_limits<uint64_t>::max();
   }
   status_ = Status::OK();
+  // if iterator is empty, this status_ would be unchecked.
+  status_.PermitUncheckedError();
   direction_ = kForward;
   ReleaseTempPinnedData();
   ResetInternalKeysSkippedCounter();
@@ -1588,6 +1590,8 @@ void DBIter::SeekToLast() {
     max_skip_ = std::numeric_limits<uint64_t>::max();
   }
   status_ = Status::OK();
+  // if iterator is empty, this status_ would be unchecked.
+  status_.PermitUncheckedError();
   direction_ = kReverse;
   ReleaseTempPinnedData();
   ResetInternalKeysSkippedCounter();
