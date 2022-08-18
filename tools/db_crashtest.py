@@ -181,7 +181,6 @@ default_params = {
     "verify_sst_unique_id_in_manifest": 1,  # always do unique_id verification
     "secondary_cache_uri": "",
     "allow_data_in_errors": True,
-    "verify_iterator_with_expected_state_one_in": 10  # this locks a range of keys
 }
 
 _TEST_DIR_ENV_VAR = 'TEST_TMPDIR'
@@ -288,6 +287,7 @@ simple_default_params = {
     "write_buffer_size": 32 * 1024 * 1024,
     "level_compaction_dynamic_level_bytes": False,
     "paranoid_file_checks": lambda: random.choice([0, 1, 1, 1]),
+    "verify_iterator_with_expected_state_one_in": 5  # this locks a range of keys
 }
 
 blackbox_simple_default_params = {
@@ -420,7 +420,6 @@ multiops_txn_default_params = {
     # Re-enable once we have a compaction for MultiOpsTxnStressTest
     "enable_compaction_filter": 0,
     "create_timestamped_snapshot_one_in": 50,
-    "verify_iterator_with_expected_state_one_in": 0  # not supported in this test yet
 }
 
 multiops_wc_txn_params = {
