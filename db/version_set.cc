@@ -1198,10 +1198,6 @@ void LevelIterator::Seek(const Slice& target) {
       return;
     }
 
-    // For Prefix Seek, the above seek may skip to end of file
-    // (!file_iter_.Valid() && file_iter_.status().ok()). While no point key in
-    // this file has a valid prefix, there may be range tombstones that cover
-    // keys with the prefix in older sorted runs.
     if (range_tombstone_iter_) {
       TrySetDeleteRangeSentinel(file_largest_key(file_index_),
                                 true /* try_prefix_sentinel */);
