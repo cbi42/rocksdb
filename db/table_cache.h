@@ -140,7 +140,8 @@ class TableCache {
       const FileMetaData& file_meta, const MultiGetContext::Range* mget_range,
       const std::shared_ptr<const SliceTransform>& prefix_extractor = nullptr,
       HistogramImpl* file_read_hist = nullptr, bool skip_filters = false,
-      int level = -1, Cache::Handle* table_handle = nullptr);
+      bool skip_range_deletions = false, int level = -1,
+      Cache::Handle* table_handle = nullptr);
 
   // Evict any entry for the specified file number
   static void Evict(Cache* cache, uint64_t file_number);
@@ -239,6 +240,11 @@ class TableCache {
       bool prefetch_index_and_filter_in_cache = true,
       size_t max_file_size_for_l0_meta_pin = 0,
       Temperature file_temperature = Temperature::kUnknown);
+
+  // Update the max_covering_tombstone_seq in the GetContext for each key based
+  // on the range deletions in the table
+  void UpdateRangeTombstoneSeqnums(const ReadOptions& options, TableReader* t,
+                                   MultiGetContext::Range& table_range);
 
   // Create a key prefix for looking up the row cache. The prefix is of the
   // format row_cache_id + fd_number + seq_no. Later, the user key can be

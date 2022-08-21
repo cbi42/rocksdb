@@ -570,6 +570,9 @@ DEFINE_double(cache_high_pri_pool_ratio, 0.0,
               "If > 0.0, we also enable "
               "cache_index_and_filter_blocks_with_high_priority.");
 
+DEFINE_double(cache_low_pri_pool_ratio, 0.0,
+              "Ratio of block cache reserve for low pri blocks.");
+
 DEFINE_string(cache_type, "lru_cache", "Type of block cache.");
 
 DEFINE_bool(use_compressed_secondary_cache, false,
@@ -588,6 +591,9 @@ DEFINE_double(compressed_secondary_cache_high_pri_pool_ratio, 0.0,
               "Ratio of block cache reserve for high pri blocks. "
               "If > 0.0, we also enable "
               "cache_index_and_filter_blocks_with_high_priority.");
+
+DEFINE_double(compressed_secondary_cache_low_pri_pool_ratio, 0.0,
+              "Ratio of block cache reserve for low pri blocks.");
 
 DEFINE_string(compressed_secondary_cache_compression_type, "lz4",
               "The compression algorithm to use for large "
@@ -1309,11 +1315,15 @@ DEFINE_string(fs_uri, "",
 DEFINE_string(simulate_hybrid_fs_file, "",
               "File for Store Metadata for Simulate hybrid FS. Empty means "
               "disable the feature. Now, if it is set, "
-              "bottommost_temperature is set to kWarm.");
+              "last_level_temperature is set to kWarm.");
 DEFINE_int32(simulate_hybrid_hdd_multipliers, 1,
              "In simulate_hybrid_fs_file or simulate_hdd mode, how many HDDs "
              "are simulated.");
 DEFINE_bool(simulate_hdd, false, "Simulate read/write latency on HDD.");
+
+DEFINE_int64(
+    preclude_last_level_data_seconds, 0,
+    "Preclude the latest data from the last level. (Used for tiered storage)");
 
 static std::shared_ptr<ROCKSDB_NAMESPACE::Env> env_guard;
 
@@ -1690,6 +1700,13 @@ static const bool FLAGS_table_cache_numshardbits_dummy __attribute__((__unused__
 DEFINE_uint32(write_batch_protection_bytes_per_key, 0,
               "Size of per-key-value checksum in each write batch. Currently "
               "only value 0 and 8 are supported.");
+
+DEFINE_uint32(
+    memtable_protection_bytes_per_key, 0,
+    "Enable memtable per key-value checksum protection. "
+    "Each entry in memtable will be suffixed by a per key-value checksum. "
+    "This options determines the size of such checksums. "
+    "Supported values: 0, 1, 2, 4, 8.");
 
 DEFINE_bool(build_info, false,
             "Print the build info via GetRocksBuildInfoAsString");
@@ -3011,11 +3028,12 @@ class Benchmark {
 #ifdef MEMKIND
           FLAGS_use_cache_memkind_kmem_allocator
               ? std::make_shared<MemkindKmemAllocator>()
-              : nullptr
+              : nullptr,
 #else
-          nullptr
+          nullptr,
 #endif
-      );
+          kDefaultToAdaptiveMutex, kDefaultCacheMetadataChargePolicy,
+          FLAGS_cache_low_pri_pool_ratio);
       if (FLAGS_use_cache_memkind_kmem_allocator) {
 #ifndef MEMKIND
         fprintf(stderr, "Memkind library is not linked with the binary.");
@@ -3044,6 +3062,8 @@ class Benchmark {
             FLAGS_compressed_secondary_cache_numshardbits;
         secondary_cache_opts.high_pri_pool_ratio =
             FLAGS_compressed_secondary_cache_high_pri_pool_ratio;
+        secondary_cache_opts.low_pri_pool_ratio =
+            FLAGS_compressed_secondary_cache_low_pri_pool_ratio;
         secondary_cache_opts.compression_type =
             FLAGS_compressed_secondary_cache_compression_type_e;
         secondary_cache_opts.compress_format_version =
@@ -4285,6 +4305,12 @@ class Benchmark {
         block_based_options.cache_index_and_filter_blocks_with_high_priority =
             true;
       }
+      if (FLAGS_cache_high_pri_pool_ratio + FLAGS_cache_low_pri_pool_ratio >
+          1.0) {
+        fprintf(stderr,
+                "Sum of high_pri_pool_ratio and low_pri_pool_ratio "
+                "cannot exceed 1.0.\n");
+      }
       block_based_options.block_cache = cache_;
       block_based_options.cache_usage_options.options_overrides.insert(
           {CacheEntryRole::kCompressionDictionaryBuildingBuffer,
@@ -4449,6 +4475,8 @@ class Benchmark {
     if (FLAGS_simulate_hybrid_fs_file != "") {
       options.bottommost_temperature = Temperature::kWarm;
     }
+    options.preclude_last_level_data_seconds =
+        FLAGS_preclude_last_level_data_seconds;
     options.sample_for_compression = FLAGS_sample_for_compression;
     options.WAL_ttl_seconds = FLAGS_wal_ttl_seconds;
     options.WAL_size_limit_MB = FLAGS_wal_size_limit_MB;
@@ -4580,6 +4608,8 @@ class Benchmark {
       exit(1);
     }
 #endif  // ROCKSDB_LITE
+    options.memtable_protection_bytes_per_key =
+        FLAGS_memtable_protection_bytes_per_key;
   }
 
   void InitializeOptionsGeneral(Options* opts) {

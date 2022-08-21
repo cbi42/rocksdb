@@ -1089,6 +1089,9 @@ void DBImpl::IOStatusCheck(const IOStatus& io_status) {
     // Maybe change the return status to void?
     error_handler_.SetBGError(io_status, BackgroundErrorReason::kWriteCallback);
     mutex_.Unlock();
+  } else {
+    // Force writable file to be continue writable.
+    logs_.back().writer->file()->reset_seen_error();
   }
 }
 
@@ -1645,12 +1648,6 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   // thread is writing to another DB with the same write buffer, they may also
   // be flushed. We may end up with flushing much more DBs than needed. It's
   // suboptimal but still correct.
-  ROCKS_LOG_INFO(
-      immutable_db_options_.info_log,
-      "Flushing column family with oldest memtable entry. Write buffers are "
-      "using %" ROCKSDB_PRIszt " bytes out of a total of %" ROCKSDB_PRIszt ".",
-      write_buffer_manager_->memory_usage(),
-      write_buffer_manager_->buffer_size());
   // no need to refcount because drop is happening in write thread, so can't
   // happen while we're in the write thread
   autovector<ColumnFamilyData*> cfds;
@@ -1664,9 +1661,11 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
       if (cfd->IsDropped()) {
         continue;
       }
-      if (!cfd->mem()->IsEmpty()) {
-        // We only consider active mem table, hoping immutable memtable is
-        // already in the process of flushing.
+      if (!cfd->mem()->IsEmpty() && !cfd->imm()->IsFlushPendingOrRunning()) {
+        // We only consider flush on CFs with bytes in the mutable memtable,
+        // and no immutable memtables for which flush has yet to finish. If
+        // we triggered flush on CFs already trying to flush, we would risk
+        // creating too many immutable memtables leading to write stalls.
         uint64_t seq = cfd->mem()->GetCreationSeq();
         if (cfd_picked == nullptr || seq < seq_num_for_cf_picked) {
           cfd_picked = cfd;
@@ -1678,6 +1677,15 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
       cfds.push_back(cfd_picked);
     }
     MaybeFlushStatsCF(&cfds);
+  }
+  if (!cfds.empty()) {
+    ROCKS_LOG_INFO(
+        immutable_db_options_.info_log,
+        "Flushing triggered to alleviate write buffer memory usage. Write "
+        "buffer is using %" ROCKSDB_PRIszt
+        " bytes out of a total of %" ROCKSDB_PRIszt ".",
+        write_buffer_manager_->memory_usage(),
+        write_buffer_manager_->buffer_size());
   }
 
   WriteThread::Writer nonmem_w;
@@ -2084,6 +2092,10 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     if (!logs_.empty()) {
       // Alway flush the buffer of the last log before switching to a new one
       log::Writer* cur_log_writer = logs_.back().writer;
+      if (error_handler_.IsRecoveryInProgress()) {
+        // In recovery path, we force another try of writing WAL buffer.
+        cur_log_writer->file()->reset_seen_error();
+      }
       io_s = cur_log_writer->WriteBuffer();
       if (s.ok()) {
         s = io_s;

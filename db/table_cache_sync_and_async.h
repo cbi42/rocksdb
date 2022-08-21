@@ -1,4 +1,5 @@
-//  Copyright (c) Meta Platforms, Inc. and its affiliates. All Rights Reserved.
+//  Copyright (c) Meta Platforms, Inc. and affiliates.
+//
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -17,8 +18,8 @@ DEFINE_SYNC_AND_ASYNC(Status, TableCache::MultiGet)
 (const ReadOptions& options, const InternalKeyComparator& internal_comparator,
  const FileMetaData& file_meta, const MultiGetContext::Range* mget_range,
  const std::shared_ptr<const SliceTransform>& prefix_extractor,
- HistogramImpl* file_read_hist, bool skip_filters, int level,
- Cache::Handle* table_handle) {
+ HistogramImpl* file_read_hist, bool skip_filters, bool skip_range_deletions,
+ int level, Cache::Handle* table_handle) {
   auto& fd = file_meta.fd;
   Status s;
   TableReader* t = fd.table_reader;
@@ -78,19 +79,8 @@ DEFINE_SYNC_AND_ASYNC(Status, TableCache::MultiGet)
         assert(t);
       }
     }
-    if (s.ok() && !options.ignore_range_deletions) {
-      std::unique_ptr<FragmentedRangeTombstoneIterator> range_del_iter(
-          t->NewRangeTombstoneIterator(options));
-      if (range_del_iter != nullptr) {
-        for (auto iter = table_range.begin(); iter != table_range.end();
-             ++iter) {
-          SequenceNumber* max_covering_tombstone_seq =
-              iter->get_context->max_covering_tombstone_seq();
-          *max_covering_tombstone_seq = std::max(
-              *max_covering_tombstone_seq,
-              range_del_iter->MaxCoveringTombstoneSeqnum(iter->ukey_with_ts));
-        }
-      }
+    if (s.ok() && !options.ignore_range_deletions && !skip_range_deletions) {
+      UpdateRangeTombstoneSeqnums(options, t, table_range);
     }
     if (s.ok()) {
       CO_AWAIT(t->MultiGet)

@@ -516,6 +516,22 @@ Status TableCache::Get(
   return s;
 }
 
+void TableCache::UpdateRangeTombstoneSeqnums(
+    const ReadOptions& options, TableReader* t,
+    MultiGetContext::Range& table_range) {
+  std::unique_ptr<FragmentedRangeTombstoneIterator> range_del_iter(
+      t->NewRangeTombstoneIterator(options));
+  if (range_del_iter != nullptr) {
+    for (auto iter = table_range.begin(); iter != table_range.end(); ++iter) {
+      SequenceNumber* max_covering_tombstone_seq =
+          iter->get_context->max_covering_tombstone_seq();
+      *max_covering_tombstone_seq = std::max(
+          *max_covering_tombstone_seq,
+          range_del_iter->MaxCoveringTombstoneSeqnum(iter->ukey_with_ts));
+    }
+  }
+}
+
 Status TableCache::MultiGetFilter(
     const ReadOptions& options,
     const InternalKeyComparator& internal_comparator,
@@ -539,6 +555,8 @@ Status TableCache::MultiGetFilter(
   Status s;
   TableReader* t = fd.table_reader;
   Cache::Handle* handle = nullptr;
+  MultiGetContext::Range tombstone_range(*mget_range, mget_range->begin(),
+                                         mget_range->end());
   if (t == nullptr) {
     s = FindTable(
         options, file_options_, internal_comparator, fd, &handle,
@@ -553,6 +571,16 @@ Status TableCache::MultiGetFilter(
   }
   if (s.ok()) {
     s = t->MultiGetFilter(options, prefix_extractor.get(), mget_range);
+  }
+  if (s.ok() && !options.ignore_range_deletions) {
+    // Update the range tombstone sequence numbers for the keys here
+    // as TableCache::MultiGet may or may not be called, and even if it
+    // is, it may be called with fewer keys in the rangedue to filtering.
+    UpdateRangeTombstoneSeqnums(options, t, tombstone_range);
+  }
+  if (mget_range->empty() && handle) {
+    ReleaseHandle(handle);
+    *table_handle = nullptr;
   }
 
   return s;
