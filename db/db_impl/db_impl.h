@@ -738,8 +738,8 @@ class DBImpl : public DB {
   // useful, e.g. when reading the whole column family.
   //
   // read_options.ignore_range_deletions determines whether range tombstones are
-  // processed internally, i.e., whether range tombstone covered keys are in
-  // this iterator's output.
+  // processed in the returned interator internally, i.e., whether range
+  // tombstone covered keys are in this iterator's output.
   // @param read_options Must outlive the returned iterator.
   InternalIterator* NewInternalIterator(
       const ReadOptions& read_options, Arena* arena, SequenceNumber sequence,
