@@ -1208,10 +1208,9 @@ void LevelIterator::Seek(const Slice& target) {
     }
   }
 
-  if (!to_return_sentinel_ && SkipEmptyFileForward() &&
-      prefix_extractor_ != nullptr && !read_options_.total_order_seek &&
-      !read_options_.auto_prefix_mode && file_iter_.iter() != nullptr &&
-      file_iter_.Valid()) {
+  if (SkipEmptyFileForward() && prefix_extractor_ != nullptr &&
+      !read_options_.total_order_seek && !read_options_.auto_prefix_mode &&
+      file_iter_.iter() != nullptr && file_iter_.Valid()) {
     // We've skipped the file we initially positioned to. In the prefix
     // seek case, it is likely that the file is skipped because of
     // prefix bloom or hash, where more keys are skipped. We then check
@@ -1273,9 +1272,7 @@ void LevelIterator::SeekForPrev(const Slice& target) {
       TrySetDeleteRangeSentinel(file_smallest_key(file_index_),
                                 true /* try_prefix_sentinel */);
     }
-    if (!to_return_sentinel_) {
-      SkipEmptyFileBackward();
-    }
+    SkipEmptyFileBackward();
   }
   CheckMayBeOutOfLowerBound();
 }
@@ -1291,9 +1288,7 @@ void LevelIterator::SeekToFirst() {
       TrySetDeleteRangeSentinel(file_largest_key(file_index_));
     }
   }
-  if (!to_return_sentinel_) {
-    SkipEmptyFileForward();
-  }
+  SkipEmptyFileForward();
   CheckMayBeOutOfLowerBound();
 }
 
@@ -1306,9 +1301,7 @@ void LevelIterator::SeekToLast() {
       TrySetDeleteRangeSentinel(file_smallest_key(file_index_));
     }
   }
-  if (!to_return_sentinel_) {
-    SkipEmptyFileBackward();
-  }
+  SkipEmptyFileBackward();
   CheckMayBeOutOfLowerBound();
 }
 
@@ -1321,16 +1314,13 @@ void LevelIterator::Next() {
   if (to_return_sentinel_) {
     // file_iter_ was at end of file already if we were to return sentinel.
     ClearSentinel();
-    SkipEmptyFileForward();
   } else {
     file_iter_.Next();
     if (range_tombstone_iter_) {
       TrySetDeleteRangeSentinel(file_largest_key(file_index_));
     }
-    if (!to_return_sentinel_) {
-      SkipEmptyFileForward();
-    }
   }
+  SkipEmptyFileForward();
 }
 
 bool LevelIterator::NextAndGetResult(IterateResult* result) {
@@ -1344,12 +1334,6 @@ bool LevelIterator::NextAndGetResult(IterateResult* result) {
       ClearSentinel();
     } else if (range_tombstone_iter_) {
       TrySetDeleteRangeSentinel(file_largest_key(file_index_));
-      if (to_return_sentinel_) {
-        result->key = sentinel_;
-        result->bound_check_result = IterBoundCheck::kUnknown;
-        result->value_prepared = true;
-        return true /* valid */;
-      }
     }
     is_next_read_sequential_ = true;
     // SkipEmptyFileForward() should be called regardless of whether there is
@@ -1400,24 +1384,23 @@ void LevelIterator::Prev() {
   assert(Valid());
   if (to_return_sentinel_) {
     ClearSentinel();
-    SkipEmptyFileBackward();
   } else {
     file_iter_.Prev();
     if (range_tombstone_iter_) {
       TrySetDeleteRangeSentinel(file_smallest_key(file_index_));
     }
-    if (!to_return_sentinel_) {
-      SkipEmptyFileBackward();
-    }
   }
+  SkipEmptyFileBackward();
 }
 
 bool LevelIterator::SkipEmptyFileForward() {
   bool seen_empty_file = false;
-  while (file_iter_.iter() == nullptr ||
-         (!file_iter_.Valid() && file_iter_.status().ok() &&
-          file_iter_.iter()->UpperBoundCheckResult() !=
-              IterBoundCheck::kOutOfBound)) {
+  // Pause at sentinel key
+  while (!to_return_sentinel_ &&
+         (file_iter_.iter() == nullptr ||
+          (!file_iter_.Valid() && file_iter_.status().ok() &&
+           file_iter_.iter()->UpperBoundCheckResult() !=
+               IterBoundCheck::kOutOfBound))) {
     seen_empty_file = true;
     // Move to next file
     if (file_index_ >= flevel_->num_files - 1) {
@@ -1442,9 +1425,6 @@ bool LevelIterator::SkipEmptyFileForward() {
           (*range_tombstone_iter_)->SeekToFirst();
         }
         TrySetDeleteRangeSentinel(file_largest_key(file_index_));
-        if (to_return_sentinel_) {
-          break;
-        }
       }
     }
   }
@@ -1452,8 +1432,10 @@ bool LevelIterator::SkipEmptyFileForward() {
 }
 
 void LevelIterator::SkipEmptyFileBackward() {
-  while (file_iter_.iter() == nullptr ||
-         (!file_iter_.Valid() && file_iter_.status().ok())) {
+  // Pause at sentinel key
+  while (!to_return_sentinel_ &&
+         (file_iter_.iter() == nullptr ||
+          (!file_iter_.Valid() && file_iter_.status().ok()))) {
     // Move to previous file
     if (file_index_ == 0) {
       // Already the first file
