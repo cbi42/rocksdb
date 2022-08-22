@@ -558,13 +558,13 @@ FragmentedRangeTombstoneIterator* MemTable::NewRangeTombstoneIteratorInternal(
     // during range deletions. We can access the cached version directly since
     // we know there is no more writes and cache won't be invalidated.
     return new FragmentedRangeTombstoneIterator(
-        (*cached_range_tombstone_.Access())->get(), comparator_.comparator,
+        cached_range_tombstone_.get(), comparator_.comparator,
         read_seq);
   }
 
   // takes current cache
-  std::shared_ptr<std::shared_ptr<FragmentedRangeTombstoneList>> cache =
-      std::atomic_load_explicit(cached_range_tombstone_.Access(),
+  auto cache =
+      std::atomic_load_explicit(&cached_range_tombstone_,
                                 std::memory_order_relaxed);
   // the tombstone iterator will ref the cache and keep it alive
   return new FragmentedRangeTombstoneIterator(cache, comparator_.comparator,
@@ -814,24 +814,10 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
     auto* unfragmented_iter =
         new MemTableIterator(*this, ReadOptions(), nullptr /* arena */,
                              true /* use_range_del_table */);
-    auto new_cache = std::make_shared<FragmentedRangeTombstoneList>(
+    std::atomic_store_explicit(&cached_range_tombstone_, std::make_shared<FragmentedRangeTombstoneList>(
         FragmentedRangeTombstoneList(
             std::unique_ptr<InternalIterator>(unfragmented_iter),
-            comparator_.comparator));
-    auto size = cached_range_tombstone_.Size();
-    for (size_t i = 0; i < size; ++i) {
-      auto cache = cached_range_tombstone_.AccessAtCore(i);
-      // It is okay for some reader to load old cache during invalidation as
-      // new sequence number is not published yet.
-      // Each core will have a shared_ptr to a shared_ptr to the cached range
-      // tombstone, so that the ref count is maintained locally per-core using
-      // the per-core shared_ptr.
-      std::atomic_store_explicit(
-          cache,
-          std::make_shared<std::shared_ptr<FragmentedRangeTombstoneList>>(
-              new_cache),
-          std::memory_order_relaxed);
-    }
+            comparator_.comparator)), std::memory_order_relaxed);
     if (allow_concurrent) {
       range_del_mutex_.unlock();
     }

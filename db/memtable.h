@@ -645,8 +645,7 @@ class MemTable {
   // cache, by constructing range tombstone list in the write path. Each reader
   // will atomically load its core-local shared_ptr and reference it to avoid
   // performance regression with multiple readers.
-  CoreLocalArray<std::shared_ptr<std::shared_ptr<FragmentedRangeTombstoneList>>>
-      cached_range_tombstone_;
+  std::shared_ptr<FragmentedRangeTombstoneList> cached_range_tombstone_;
 };
 
 extern const char* EncodeKey(std::string* scratch, const Slice& target);
