@@ -409,6 +409,17 @@ class MemTable {
     return earliest_seqno_.store(earliest_seqno, std::memory_order_relaxed);
   }
 
+  // Returns the sequence number that is guaranteed to be smaller than or equal
+  // to the sequence number of any key that could be inserted into this
+  // memtable. It can then be assumed that any write with a larger(or equal)
+  // sequence number will be present in this memtable or a later memtable.
+  //
+  // If the earliest sequence number could not be determined,
+  // kMaxSequenceNumber will be returned.
+  SequenceNumber GetLargestSequenceNumber() {
+    return largest_seqno_.load(std::memory_order_relaxed);
+  }
+
   // DB's latest sequence ID when the memtable is created. This number
   // may be updated to a more recent one before any key is inserted.
   SequenceNumber GetCreationSeq() const { return creation_seq_; }
@@ -576,6 +587,8 @@ class MemTable {
   // The db sequence number at the time of creation or kMaxSequenceNumber
   // if not set.
   std::atomic<SequenceNumber> earliest_seqno_;
+
+  std::atomic<SequenceNumber> largest_seqno_;
 
   SequenceNumber creation_seq_;
 

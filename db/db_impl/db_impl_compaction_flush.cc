@@ -220,7 +220,7 @@ Status DBImpl::FlushMemTableToOutputFile(
       &event_logger_, mutable_cf_options.report_bg_io_stats,
       true /* sync_output_directory */, true /* write_manifest */, thread_pri,
       io_tracer_, seqno_time_mapping_, db_id_, db_session_id_,
-      cfd->GetFullHistoryTsLow(), &blob_callback_);
+      cfd->GetFullHistoryTsLow(), &blob_callback_, this);
   FileMetaData file_meta;
 
   Status s;
@@ -468,7 +468,7 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
         stats_, &event_logger_, mutable_cf_options.report_bg_io_stats,
         false /* sync_output_directory */, false /* write_manifest */,
         thread_pri, io_tracer_, seqno_time_mapping_, db_id_, db_session_id_,
-        cfd->GetFullHistoryTsLow(), &blob_callback_));
+        cfd->GetFullHistoryTsLow(), &blob_callback_, this));
   }
 
   std::vector<FileMetaData> file_meta(num_cfs);
@@ -1704,7 +1704,8 @@ Status DBImpl::ReFitLevel(ColumnFamilyData* cfd, int level, int target_level) {
           f->smallest, f->largest, f->fd.smallest_seqno, f->fd.largest_seqno,
           f->marked_for_compaction, f->temperature, f->oldest_blob_file_number,
           f->oldest_ancester_time, f->file_creation_time, f->file_checksum,
-          f->file_checksum_func_name, f->unique_id);
+          f->file_checksum_func_name, f->unique_id,
+          f->compensated_range_deletion_size);
     }
     ROCKS_LOG_DEBUG(immutable_db_options_.info_log,
                     "[%s] Apply version edit:\n%s", cfd->GetName().c_str(),
@@ -2947,6 +2948,7 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
     // signal the DB destructor that it's OK to proceed with destruction. In
     // that case, all DB variables will be dealloacated and referencing them
     // will cause trouble.
+    //    exit(1);
   }
 }
 
@@ -3345,7 +3347,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
             f->fd.largest_seqno, f->marked_for_compaction, f->temperature,
             f->oldest_blob_file_number, f->oldest_ancester_time,
             f->file_creation_time, f->file_checksum, f->file_checksum_func_name,
-            f->unique_id);
+            f->unique_id, f->compensated_range_deletion_size);
 
         ROCKS_LOG_BUFFER(
             log_buffer,

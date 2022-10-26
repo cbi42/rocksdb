@@ -101,6 +101,7 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
       file_number_(0),
       first_seqno_(0),
       earliest_seqno_(latest_seq),
+      largest_seqno_(latest_seq),
       creation_seq_(latest_seq),
       mem_next_logfile_number_(0),
       min_prep_log_referenced_(0),
@@ -808,6 +809,8 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
       }
       assert(first_seqno_.load() >= earliest_seqno_.load());
     }
+    largest_seqno_ =
+        std::max(largest_seqno_.load(std::memory_order_relaxed), s);
     assert(post_process_info == nullptr);
     UpdateFlushState();
   } else {
@@ -844,6 +847,10 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
     while (
         (cur_earliest_seqno == kMaxSequenceNumber || s < cur_earliest_seqno) &&
         !first_seqno_.compare_exchange_weak(cur_earliest_seqno, s)) {
+    }
+    uint64_t cur_largest = largest_seqno_.load(std::memory_order_relaxed);
+    while ((s > cur_largest) &&
+           !largest_seqno_.compare_exchange_weak(cur_largest, s)) {
     }
   }
   if (type == kTypeRangeDeletion) {
@@ -1460,6 +1467,8 @@ Status MemTable::Update(SequenceNumber seq, ValueType value_type,
             UpdateEntryChecksum(nullptr, key, value, type, existing_seq,
                                 p + value.size());
           }
+          largest_seqno_ =
+              std::max(largest_seqno_.load(std::memory_order_relaxed), seq);
           return Status::OK();
         }
       }
@@ -1535,6 +1544,8 @@ Status MemTable::UpdateCallback(SequenceNumber seq, const Slice& key,
             UpdateEntryChecksum(nullptr, key, new_value, type, existing_seq,
                                 prev_buffer + new_prev_size);
           }
+          largest_seqno_ =
+              std::max(largest_seqno_.load(std::memory_order_relaxed), seq);
           return Status::OK();
         } else if (status == UpdateStatus::UPDATED) {
           Status s;
@@ -1554,6 +1565,8 @@ Status MemTable::UpdateCallback(SequenceNumber seq, const Slice& key,
           // `UPDATE_FAILED` is named incorrectly. It indicates no update
           // happened. It does not indicate a failure happened.
           UpdateFlushState();
+          largest_seqno_ =
+              std::max(largest_seqno_.load(std::memory_order_relaxed), seq);
           return Status::OK();
         }
       }

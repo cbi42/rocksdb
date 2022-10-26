@@ -56,6 +56,10 @@ struct FragmentedRangeTombstoneList {
       const InternalKeyComparator& icmp, bool for_compaction = false,
       const std::vector<SequenceNumber>& snapshots = {});
 
+  FragmentedRangeTombstoneList(std::vector<std::string>& start_keys,
+                               std::vector<std::string>& end_keys,
+                               std::vector<SequenceNumber>& seqs);
+
   std::vector<RangeTombstoneStack>::const_iterator begin() const {
     return tombstones_.begin();
   }
@@ -117,6 +121,7 @@ struct FragmentedRangeTombstoneList {
   std::vector<Slice> tombstone_timestamps_;
   std::once_flag seq_set_init_once_flag_;
   std::set<SequenceNumber> seq_set_;
+  //  std::vector<SequenceNumber> seq_set_;
   std::list<std::string> pinned_slices_;
   PinnedIteratorsManager pinned_iters_mgr_;
   uint64_t num_unfragmented_tombstones_;

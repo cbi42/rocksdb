@@ -471,7 +471,7 @@ Status ExternalSstFileIngestionJob::Run() {
         f.smallest_internal_key, f.largest_internal_key, f.assigned_seqno,
         f.assigned_seqno, false, f.file_temperature, kInvalidBlobFileNumber,
         oldest_ancester_time, current_time, f.file_checksum,
-        f.file_checksum_func_name, f.unique_id);
+        f.file_checksum_func_name, f.unique_id, 0);
     f_metadata.temperature = f.file_temperature;
     edit_.AddFile(f.picked_level, f_metadata);
   }

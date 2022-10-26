@@ -1809,24 +1809,33 @@ static void CleanupGetMergeOperandsState(void* arg1, void* /*arg2*/) {
 
 }  // namespace
 
-InternalIterator* DBImpl::NewInternalIterator(
-    const ReadOptions& read_options, ColumnFamilyData* cfd,
-    SuperVersion* super_version, Arena* arena, SequenceNumber sequence,
-    bool allow_unprepared_value, ArenaWrappedDBIter* db_iter) {
+Iterator* DBImpl::NewInternalIterator(const ReadOptions& read_options,
+                                      ColumnFamilyData* cfd,
+                                      autovector<MemTable*>& mems_,
+                                      Version* version, SequenceNumber sequence,
+                                      bool allow_unprepared_value) {
+  MutableCFOptions cf_opts = *cfd->GetCurrentMutableCFOptions();
+  ArenaWrappedDBIter* db_iter = NewArenaWrappedDbIterator(
+      env_, read_options, *cfd->ioptions(), cf_opts, version, sequence,
+      cf_opts.max_sequential_skip_in_iterations, version->GetVersionNumber(),
+      nullptr, this, cfd, false /* expose_blob_index */,
+      false /* allow_refresh */);
+  Arena* arena = db_iter->GetArena();
+  // Note that kPersistedTier is not open to public interface.
+  // It is used only in BuildTable() internally during flush.
+  // TODO: sanity check DBIter implementation for when memtable iter is not set
   InternalIterator* internal_iter;
   assert(arena != nullptr);
   // Need to create internal iterator from the arena.
-  MergeIteratorBuilder merge_iter_builder(
-      &cfd->internal_comparator(), arena,
-      !read_options.total_order_seek &&
-          super_version->mutable_cf_options.prefix_extractor != nullptr);
+  MergeIteratorBuilder merge_iter_builder(&cfd->internal_comparator(), arena);
   // Collect iterator for mutable memtable
-  auto mem_iter = super_version->mem->NewIterator(read_options, arena);
+  const ReadOptions& ro = db_iter->GetReadOptions();
   Status s;
-  if (!read_options.ignore_range_deletions) {
+  for (auto& mem : mems_) {
+    auto mem_iter = mem->NewIterator(ro, arena);
     TruncatedRangeDelIterator* mem_tombstone_iter = nullptr;
-    auto range_del_iter = super_version->mem->NewRangeTombstoneIterator(
-        read_options, sequence, false /* immutable_memtable */);
+    auto range_del_iter = mem->NewRangeTombstoneIterator(
+        ro, sequence, true /* immutable_memtable */);
     if (range_del_iter == nullptr || range_del_iter->empty()) {
       delete range_del_iter;
     } else {
@@ -1837,14 +1846,61 @@ InternalIterator* DBImpl::NewInternalIterator(
     }
     merge_iter_builder.AddPointAndTombstoneIterator(mem_iter,
                                                     mem_tombstone_iter);
-  } else {
-    merge_iter_builder.AddIterator(mem_iter);
   }
-
-  // Collect all needed child iterators for immutable memtables
   if (s.ok()) {
-    super_version->imm->AddIterators(read_options, &merge_iter_builder,
-                                     !read_options.ignore_range_deletions);
+    // Collect iterators for files in L0 - Ln
+    version->AddIterators(ro, file_options_, &merge_iter_builder,
+                          allow_unprepared_value);
+    internal_iter = merge_iter_builder.Finish(nullptr);
+
+    db_iter->SetIterUnderDBIter(internal_iter);
+    return db_iter;
+  }
+  db_iter->SetIterUnderDBIter(NewErrorInternalIterator<Slice>(s, arena));
+  return db_iter;
+}
+
+InternalIterator* DBImpl::NewInternalIterator(
+    const ReadOptions& read_options, ColumnFamilyData* cfd,
+    SuperVersion* super_version, Arena* arena, SequenceNumber sequence,
+    bool allow_unprepared_value, ArenaWrappedDBIter* db_iter) {
+  // Note that kPersistedTier is not open to public interface.
+  // It is used only in BuildTable() internally during flush.
+  // TODO: sanity check DBIter implementation for when memtable iter is not set
+  InternalIterator* internal_iter;
+  assert(arena != nullptr);
+  // Need to create internal iterator from the arena.
+  MergeIteratorBuilder merge_iter_builder(
+      &cfd->internal_comparator(), arena,
+      !read_options.total_order_seek &&
+          super_version->mutable_cf_options.prefix_extractor != nullptr);
+  // Collect iterator for mutable memtable
+  Status s;
+  if (read_options.read_tier != kPersistedTier) {
+    auto mem_iter = super_version->mem->NewIterator(read_options, arena);
+    if (!read_options.ignore_range_deletions) {
+      TruncatedRangeDelIterator* mem_tombstone_iter = nullptr;
+      auto range_del_iter = super_version->mem->NewRangeTombstoneIterator(
+          read_options, sequence, false /* immutable_memtable */);
+      if (range_del_iter == nullptr || range_del_iter->empty()) {
+        delete range_del_iter;
+      } else {
+        mem_tombstone_iter = new TruncatedRangeDelIterator(
+            std::unique_ptr<FragmentedRangeTombstoneIterator>(range_del_iter),
+            &cfd->ioptions()->internal_comparator, nullptr /* smallest */,
+            nullptr /* largest */);
+      }
+      merge_iter_builder.AddPointAndTombstoneIterator(mem_iter,
+                                                      mem_tombstone_iter);
+    } else {
+      merge_iter_builder.AddIterator(mem_iter);
+    }
+
+    // Collect all needed child iterators for immutable memtables
+    if (s.ok()) {
+      super_version->imm->AddIterators(read_options, &merge_iter_builder,
+                                       !read_options.ignore_range_deletions);
+    }
   }
   TEST_SYNC_POINT_CALLBACK("DBImpl::NewInternalIterator:StatusCallback", &s);
   if (s.ok()) {
@@ -1854,8 +1910,11 @@ InternalIterator* DBImpl::NewInternalIterator(
                                            &merge_iter_builder,
                                            allow_unprepared_value);
     }
-    internal_iter = merge_iter_builder.Finish(
-        read_options.ignore_range_deletions ? nullptr : db_iter);
+    internal_iter =
+        merge_iter_builder.Finish((read_options.ignore_range_deletions ||
+                                   read_options.read_tier == kPersistedTier)
+                                      ? nullptr
+                                      : db_iter);
     SuperVersionHandle* cleanup = new SuperVersionHandle(
         this, &mutex_, super_version,
         read_options.background_purge_on_iterator_cleanup ||

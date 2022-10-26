@@ -10,9 +10,11 @@
 #include <utility>
 #include <vector>
 
+#include "db/db_impl/db_impl.h"
 #include "db/range_tombstone_fragmenter.h"
 #include "db/seqno_to_time_mapping.h"
 #include "db/table_properties_collector.h"
+#include "db/version_set.h"
 #include "logging/event_logger.h"
 #include "options/cf_options.h"
 #include "rocksdb/comparator.h"
@@ -47,8 +49,14 @@ TableBuilder* NewTableBuilder(const TableBuilderOptions& tboptions,
 // If no data is present in *iter, meta->file_size will be set to
 // zero, and no Table file will be produced.
 //
+// The following parameters are needed when converting point to range tombstones are
+// enabled: db, cfd, mems_ and base_.
+//
 // @param column_family_name Name of the column family that is also identified
 //    by column_family_id, or empty string if unknown.
+// @param base_ The current Version for flush job. This is used to compute compensated
+// file size for range tombstones. TODO: check if db_open passes in version.
+// TODO: remove max_seqno
 extern Status BuildTable(
     const std::string& dbname, VersionSet* versions,
     const ImmutableDBOptions& db_options, const TableBuilderOptions& tboptions,
@@ -70,6 +78,9 @@ extern Status BuildTable(
     Env::WriteLifeTimeHint write_hint = Env::WLTH_NOT_SET,
     const std::string* full_history_ts_low = nullptr,
     BlobFileCompletionCallback* blob_callback = nullptr,
+    DBImpl* db = nullptr,
+    ColumnFamilyData* cfd = nullptr, SequenceNumber max_seqno = 0,
+    autovector<MemTable*>* mems = nullptr, Version* base_version = nullptr,
     uint64_t* num_input_entries = nullptr,
     uint64_t* memtable_payload_bytes = nullptr,
     uint64_t* memtable_garbage_bytes = nullptr);

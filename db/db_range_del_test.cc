@@ -463,6 +463,9 @@ TEST_F(DBRangeDelTest, ValidUniversalSubcompactionBoundaries) {
   options.num_levels = kNumLevels;
   options.target_file_size_base = kNumPerFile << 10;
   options.target_file_size_multiplier = 1;
+  // Compensated range deletions size will trigger major compaction with default
+  // 200 space amp percent.
+  options.compaction_options_universal.max_size_amplification_percent = 300;
   Reopen(options);
 
   Random rnd(301);
@@ -2752,6 +2755,208 @@ TEST_F(DBRangeDelTest, RefreshMemtableIter) {
   // subsequent refresh to double free.
   ASSERT_OK(iter->Refresh());
   ASSERT_OK(iter->Refresh());
+}
+
+TEST_F(DBRangeDelTest, PointToRangeTombstone) {
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  DestroyAndReopen(options);
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_OK(Delete(Key(i)));
+  }
+  ASSERT_OK(Flush());
+  std::string value;
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(db_->Get(ReadOptions(), "b1", &value).IsNotFound());
+  }
+  std::vector<LiveFileMetaData> live_file_meta;
+  db_->GetLiveFilesMetaData(&live_file_meta);
+  for (const auto& meta : live_file_meta) {
+    ASSERT_EQ(meta.num_deletions, 2);
+    ASSERT_EQ(meta.num_entries, 2);
+  }
+}
+
+TEST_F(DBRangeDelTest, PointToRangeTombstoneWithSnapshot) {
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  DestroyAndReopen(options);
+  const Snapshot* snapshot;
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_OK(Delete(Key(i)));
+    if (i == 0) {
+      snapshot = db_->GetSnapshot();
+    }
+  }
+  ASSERT_OK(Flush());
+  std::string value;
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(db_->Get(ReadOptions(), "b1", &value).IsNotFound());
+  }
+  std::vector<LiveFileMetaData> live_file_meta;
+  db_->GetLiveFilesMetaData(&live_file_meta);
+  for (const auto& meta : live_file_meta) {
+    ASSERT_EQ(meta.num_deletions, 3);
+    ASSERT_EQ(meta.num_entries, 3);
+  }
+  db_->ReleaseSnapshot(snapshot);
+}
+
+TEST_F(DBRangeDelTest, RangetombesoneCompensateFilesize) {
+  Options opts = CurrentOptions();
+  opts.disable_auto_compactions = true;
+  DestroyAndReopen(opts);
+
+  std::vector<std::string> values;
+  Random rnd(301);
+  // file in L2
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("a", values.back()));
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("b", values.back()));
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(2);
+  uint64_t l2_size = 0;
+  ASSERT_OK(Size("a", "c", 0 /* cf */, &l2_size));
+  ASSERT_GT(l2_size, 0);
+  // file in L1
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("d", values.back()));
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("e", values.back()));
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(1);
+  uint64_t l1_size = 0;
+  ASSERT_OK(Size("d", "f", 0 /* cf */, &l1_size));
+  ASSERT_GT(l1_size, 0);
+
+  ASSERT_OK(
+      db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), "a", "f"));
+  ASSERT_OK(Flush());
+  // Range deletion compensated size computed during flush time
+  std::vector<std::vector<FileMetaData>> level_to_files;
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_EQ(level_to_files[0].size(), 1);
+  ASSERT_EQ(level_to_files[0][0].compensated_range_deletion_size,
+            l1_size + l2_size);
+  ASSERT_EQ(level_to_files[1].size(), 1);
+  ASSERT_EQ(level_to_files[1][0].compensated_range_deletion_size, 0);
+  ASSERT_EQ(level_to_files[2].size(), 1);
+  ASSERT_EQ(level_to_files[2][0].compensated_range_deletion_size, 0);
+
+  // Range deletion compensated size computed during compaction time
+  ASSERT_OK(dbfull()->TEST_CompactRange(0, nullptr, nullptr, nullptr,
+                                        true /* disallow_trivial_move */));
+  ASSERT_EQ(NumTableFilesAtLevel(0), 0);
+  ASSERT_EQ(NumTableFilesAtLevel(1), 1);
+  ASSERT_EQ(NumTableFilesAtLevel(2), 1);
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_EQ(level_to_files[1].size(), 1);
+  ASSERT_EQ(level_to_files[1][0].compensated_range_deletion_size, l2_size);
+  ASSERT_EQ(level_to_files[2].size(), 1);
+  ASSERT_EQ(level_to_files[2][0].compensated_range_deletion_size, 0);
+}
+
+TEST_F(DBRangeDelTest, RangetombesoneCompensateFilesizeSkippedDuringOpen) {
+  Options opts = CurrentOptions();
+  opts.disable_auto_compactions = true;
+  DestroyAndReopen(opts);
+
+  std::vector<std::string> values;
+  Random rnd(301);
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("a", values.back()));
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("b", values.back()));
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(1);
+  uint64_t l1_size = 0;
+  ASSERT_OK(Size("a", "c", 0, &l1_size));
+  ASSERT_GT(l1_size, 0);
+
+  ASSERT_OK(
+      db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), "a", "c"));
+  opts.skip_stats_update_on_db_open = false;
+  Reopen(opts);
+
+  std::vector<std::vector<FileMetaData>> level_to_files;
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_EQ(level_to_files[0].size(), 1);
+  ASSERT_EQ(level_to_files[0][0].compensated_range_deletion_size, l1_size);
+  ASSERT_EQ(level_to_files[1].size(), 1);
+  ASSERT_EQ(level_to_files[1][0].compensated_range_deletion_size, 0);
+
+  DestroyAndReopen(opts);
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("a", values.back()));
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("b", values.back()));
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(1);
+  ASSERT_OK(Size("a", "c", 0, &l1_size));
+  ASSERT_GT(l1_size, 0);
+
+  ASSERT_OK(
+      db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), "a", "c"));
+  opts.skip_stats_update_on_db_open = true;
+  Reopen(opts);
+
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_EQ(level_to_files[0].size(), 1);
+  ASSERT_EQ(level_to_files[0][0].compensated_range_deletion_size, 0);
+  ASSERT_EQ(level_to_files[1].size(), 1);
+  ASSERT_EQ(level_to_files[1][0].compensated_range_deletion_size, 0);
+}
+
+TEST_F(DBRangeDelTest, RangetombesoneCompensateFilesizePersistDuringReopen) {
+  Options opts = CurrentOptions();
+  opts.disable_auto_compactions = true;
+  DestroyAndReopen(opts);
+
+  std::vector<std::string> values;
+  Random rnd(301);
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("a", values.back()));
+  values.push_back(rnd.RandomString(1 << 10));
+  ASSERT_OK(Put("b", values.back()));
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(2);
+
+  ASSERT_OK(
+      db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), "a", "c"));
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(1);
+
+  ASSERT_OK(
+      db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), "a", "z"));
+  ASSERT_OK(Flush());
+
+  std::vector<std::vector<FileMetaData>> level_to_files;
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_EQ(level_to_files[0].size(), 1);
+  ASSERT_EQ(level_to_files[1].size(), 1);
+  ASSERT_EQ(level_to_files[2].size(), 1);
+  uint64_t l2_size = level_to_files[2][0].fd.GetFileSize();
+  uint64_t l1_size = level_to_files[1][0].fd.GetFileSize();
+  ASSERT_GT(l2_size, 0);
+  ASSERT_GT(l1_size, 0);
+  ASSERT_EQ(level_to_files[0][0].compensated_range_deletion_size,
+            l1_size + l2_size);
+  ASSERT_EQ(level_to_files[1][0].compensated_range_deletion_size, l2_size);
+
+  Reopen(opts);
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_EQ(level_to_files[0].size(), 1);
+  ASSERT_EQ(level_to_files[0][0].compensated_range_deletion_size,
+            l1_size + l2_size);
+  ASSERT_EQ(level_to_files[1].size(), 1);
+  ASSERT_EQ(level_to_files[1][0].compensated_range_deletion_size, l2_size);
 }
 
 #endif  // ROCKSDB_LITE

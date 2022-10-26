@@ -97,7 +97,7 @@ FlushJob::FlushJob(
     Env::Priority thread_pri, const std::shared_ptr<IOTracer>& io_tracer,
     const SeqnoToTimeMapping& seqno_time_mapping, const std::string& db_id,
     const std::string& db_session_id, std::string full_history_ts_low,
-    BlobFileCompletionCallback* blob_callback)
+    BlobFileCompletionCallback* blob_callback, DBImpl* db)
     : dbname_(dbname),
       db_id_(db_id),
       db_session_id_(db_session_id),
@@ -130,7 +130,8 @@ FlushJob::FlushJob(
       clock_(db_options_.clock),
       full_history_ts_low_(std::move(full_history_ts_low)),
       blob_callback_(blob_callback),
-      db_impl_seqno_time_mapping_(seqno_time_mapping) {
+      db_impl_seqno_time_mapping_(seqno_time_mapping),
+      db_(db) {
   // Update the thread status to indicate flush.
   ReportStartedFlush();
   TEST_SYNC_POINT("FlushJob::FlushJob()");
@@ -857,6 +858,7 @@ Status FlushJob::WriteLevel0Table() {
     TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:num_memtables",
                              &mems_size);
     assert(job_context_);
+    SequenceNumber max_seqno = 0;
     for (MemTable* m : mems_) {
       ROCKS_LOG_INFO(
           db_options_.info_log,
@@ -872,6 +874,7 @@ Status FlushJob::WriteLevel0Table() {
       total_num_deletes += m->num_deletes();
       total_data_size += m->get_data_size();
       total_memory_usage += m->ApproximateMemoryUsage();
+      max_seqno = std::max(max_seqno, m->GetLargestSequenceNumber());
     }
 
     event_logger_->Log() << "job" << job_context_->job_id << "event"
@@ -946,7 +949,8 @@ Status FlushJob::WriteLevel0Table() {
           BlobFileCreationReason::kFlush, seqno_to_time_mapping_, event_logger_,
           job_context_->job_id, io_priority, &table_properties_, write_hint,
           full_history_ts_low, blob_callback_, &num_input_entries,
-          &memtable_payload_bytes, &memtable_garbage_bytes);
+          &memtable_payload_bytes, &memtable_garbage_bytes, db_, cfd_,
+          max_seqno, &mems_, base_);
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());
       io_s.PermitUncheckedError();
@@ -1006,7 +1010,8 @@ Status FlushJob::WriteLevel0Table() {
                    meta_.marked_for_compaction, meta_.temperature,
                    meta_.oldest_blob_file_number, meta_.oldest_ancester_time,
                    meta_.file_creation_time, meta_.file_checksum,
-                   meta_.file_checksum_func_name, meta_.unique_id);
+                   meta_.file_checksum_func_name, meta_.unique_id,
+                   meta_.compensated_range_deletion_size);
 
     edit_->SetBlobFileAdditions(std::move(blob_file_additions));
   }

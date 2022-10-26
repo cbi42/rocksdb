@@ -7010,10 +7010,14 @@ class Benchmark {
           for (int64_t offset = 0; offset < range_tombstone_width_; ++offset) {
             GenerateKeyFromInt(begin_num + offset, FLAGS_num,
                                &expanded_keys[offset]);
+            // TODO: rate limit here
             if (!db->Delete(write_options_, expanded_keys[offset]).ok()) {
               fprintf(stderr, "delete error: %s\n", s.ToString().c_str());
               exit(1);
             }
+            write_rate_limiter->Request(expanded_keys[offset].size(),
+                                        Env::IO_HIGH, nullptr /* stats */,
+                                        RateLimiter::OpType::kWrite);
           }
         } else {
           GenerateKeyFromInt(begin_num, FLAGS_num, &begin_key);
