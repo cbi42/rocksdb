@@ -948,9 +948,9 @@ Status FlushJob::WriteLevel0Table() {
           cfd_->internal_stats(), &io_s, io_tracer_,
           BlobFileCreationReason::kFlush, seqno_to_time_mapping_, event_logger_,
           job_context_->job_id, io_priority, &table_properties_, write_hint,
-          full_history_ts_low, blob_callback_, &num_input_entries,
-          &memtable_payload_bytes, &memtable_garbage_bytes, db_, cfd_,
-          max_seqno, &mems_, base_);
+          full_history_ts_low, blob_callback_, db_, cfd_,
+          max_seqno, &mems_, base_, &num_input_entries,
+          &memtable_payload_bytes, &memtable_garbage_bytes);
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());
       io_s.PermitUncheckedError();

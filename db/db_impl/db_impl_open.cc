@@ -1564,8 +1564,8 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
           io_tracer_, BlobFileCreationReason::kRecovery,
           empty_seqno_time_mapping, &event_logger_, job_id, Env::IO_HIGH,
           nullptr /* table_properties */, write_hint,
-          nullptr /*full_history_ts_low*/, &blob_callback_, nullptr, nullptr,
-          nullptr, nullptr, nullptr, 0, nullptr, version);
+          nullptr /*full_history_ts_low*/, &blob_callback_, nullptr, nullptr, 0,
+          nullptr, version, nullptr, nullptr, nullptr);
       if (version) {
         version->Unref();
       }
