@@ -171,6 +171,14 @@ size_t MemTable::ApproximateMemoryUsage() {
 
 bool MemTable::ShouldFlushNow() {
   size_t write_buffer_size = write_buffer_size_.load(std::memory_order_relaxed);
+  // TODO: use option for deletion triggered flush
+  uint64_t num_deletes = num_deletes_.load(std::memory_order_relaxed);
+  uint64_t num_entries = num_entries_.load(std::memory_order_relaxed);
+  uint64_t data_size = data_size_.load(std::memory_order_relaxed);
+  if (data_size / write_buffer_size_ > 0.1 && num_deletes / (num_entries + 1) > 0.5 && num_deletes > 100000) {
+    return true;
+  }
+
   // In a lot of times, we cannot allocate arena blocks that exactly matches the
   // buffer size. Thus we have to decide if we should over-allocate or
   // under-allocate.
@@ -784,7 +792,7 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
                        std::memory_order_relaxed);
     data_size_.store(data_size_.load(std::memory_order_relaxed) + encoded_len,
                      std::memory_order_relaxed);
-    if (type == kTypeDeletion) {
+    if (type == kTypeDeletion || type == kTypeSingleDeletion || type == kTypeDeletionWithTimestamp) {
       num_deletes_.store(num_deletes_.load(std::memory_order_relaxed) + 1,
                          std::memory_order_relaxed);
     }
@@ -821,7 +829,7 @@ Status MemTable::Add(SequenceNumber s, ValueType type,
     assert(post_process_info != nullptr);
     post_process_info->num_entries++;
     post_process_info->data_size += encoded_len;
-    if (type == kTypeDeletion) {
+    if (type == kTypeDeletion || type == kTypeSingleDeletion || type == kTypeDeletionWithTimestamp) {
       post_process_info->num_deletes++;
     }
 
