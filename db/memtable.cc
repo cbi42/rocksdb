@@ -175,7 +175,7 @@ bool MemTable::ShouldFlushNow() {
   uint64_t num_deletes = num_deletes_.load(std::memory_order_relaxed);
   uint64_t num_entries = num_entries_.load(std::memory_order_relaxed);
   uint64_t data_size = data_size_.load(std::memory_order_relaxed);
-  if (data_size / write_buffer_size_ > 0.1 && num_deletes / (num_entries + 1) > 0.5 && num_deletes > 100000) {
+  if (data_size > (1<<20) && num_deletes / num_entries * 0.5 && num_deletes > 50000) {
     return true;
   }
 
