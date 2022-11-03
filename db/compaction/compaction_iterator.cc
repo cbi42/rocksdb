@@ -545,6 +545,12 @@ void CompactionIterator::NextFromInput() {
       value_.clear();
       validity_info_.SetValid(ValidContext::kKeepSDAndClearPut);
       clear_and_output_next_key_ = false;
+    } else if ((!timestamp_size_ || cmp_with_history_ts_low_ < 0) &&
+               range_del_agg_->ShouldDelete(
+                   key_, RangeDelPositioningMode::kForwardTraversal)) {
+      ++iter_stats_.num_record_drop_hidden;
+      ++iter_stats_.num_record_drop_range_del;
+      AdvanceInputIter();
     } else if (ikey_.type == kTypeSingleDeletion) {
       // We can compact out a SingleDelete if:
       // 1) We encounter the corresponding PUT -OR- we know that this key
@@ -924,18 +930,7 @@ void CompactionIterator::NextFromInput() {
       // trim_ts_. We drop keys here that are below history_ts_low_ and are
       // covered by a range tombstone that is at or below history_ts_low_ and
       // trim_ts.
-      bool should_delete = false;
-      if (!timestamp_size_ || cmp_with_history_ts_low_ < 0) {
-        should_delete = range_del_agg_->ShouldDelete(
-            key_, RangeDelPositioningMode::kForwardTraversal);
-      }
-      if (should_delete) {
-        ++iter_stats_.num_record_drop_hidden;
-        ++iter_stats_.num_record_drop_range_del;
-        AdvanceInputIter();
-      } else {
-        validity_info_.SetValid(ValidContext::kNewUserKey);
-      }
+      validity_info_.SetValid(ValidContext::kNewUserKey);
     }
 
     if (need_skip) {
