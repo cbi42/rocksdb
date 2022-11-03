@@ -1104,6 +1104,14 @@ struct AdvancedColumnFamilyOptions {
   // Default: 0 (disabled)
   uint32_t tombstone_conversion_threshold = 0;
 
+  // EXPERIMENTAL
+  //
+  // If non-zero, mark memtables available for flush when the number of point
+  // tombstones in a memtable exceeds this threshold.
+  //
+  // Default: 0 (disabled)
+  uint64_t deletion_triggered_flush_threshold = 0;
+
   // Create ColumnFamilyOptions with default values for all fields
   AdvancedColumnFamilyOptions();
   // Create ColumnFamilyOptions from Options

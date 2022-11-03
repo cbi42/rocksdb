@@ -280,6 +280,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
   cf_opts->bottommost_temperature = moptions.last_level_temperature;
   cf_opts->tombstone_conversion_threshold =
       moptions.tombstone_conversion_threshold;
+  cf_opts->deletion_triggered_flush_threshold =
+      moptions.deletion_triggered_flush_threshold;
 }
 
 void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,

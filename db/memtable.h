@@ -59,6 +59,7 @@ struct ImmutableMemTableOptions {
   Logger* info_log;
   bool allow_data_in_errors;
   uint32_t protection_bytes_per_key;
+  uint64_t deletion_triggered_flush_threshold;
 };
 
 // Batched counters to updated when inserting keys in one write batch.

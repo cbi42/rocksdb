@@ -2791,7 +2791,7 @@ TEST_F(DBRangeDelTest, PointToRangeTombstoneWithSnapshot) {
   ASSERT_OK(Flush());
   std::string value;
   for (int i = 0; i < 4; ++i) {
-    ASSERT_TRUE(db_->Get(ReadOptions(), "b1", &value).IsNotFound());
+    ASSERT_TRUE(db_->Get(ReadOptions(), Key(i), &value).IsNotFound());
   }
 
   // Tombstones 0, 1, 2, 3 should be converted to [0, 3) and 3.
@@ -2924,6 +2924,34 @@ TEST_F(DBRangeDelTest, PointToRangeTombstoneConcurrentFlush) {
   ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
   std::string val = Get(Key(2));
   ASSERT_EQ(val, "val");
+}
+
+TEST_F(DBRangeDelTest, PointToRangeTombstoneWithDeletionTriggeredFlush) {
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  options.tombstone_conversion_threshold = 4;
+  options.deletion_triggered_flush_threshold = 4;
+  DestroyAndReopen(options);
+  Random rnd(301);
+  ASSERT_OK(Put(Key(5), rnd.RandomString(2 << 20)));
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_OK(Delete(Key(i)));
+  }
+  // Trigger flush
+  ASSERT_OK(Put(Key(5), rnd.RandomString(2)));
+  ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
+  ASSERT_EQ(1, NumTableFilesAtLevel(0));
+  std::string value;
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(db_->Get(ReadOptions(), Key(i), &value).IsNotFound());
+  }
+  // Tombstones 0, 1, 2, 3 should be converted to [0, 3) and 3.
+  std::vector<LiveFileMetaData> live_file_meta;
+  db_->GetLiveFilesMetaData(&live_file_meta);
+  for (const auto& meta : live_file_meta) {
+    ASSERT_EQ(meta.num_deletions, 2);
+    ASSERT_EQ(meta.num_entries, 3);
+  }
 }
 
 #endif  // ROCKSDB_LITE

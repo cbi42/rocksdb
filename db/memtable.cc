@@ -66,7 +66,9 @@ ImmutableMemTableOptions::ImmutableMemTableOptions(
       info_log(ioptions.logger),
       allow_data_in_errors(ioptions.allow_data_in_errors),
       protection_bytes_per_key(
-          mutable_cf_options.memtable_protection_bytes_per_key) {}
+          mutable_cf_options.memtable_protection_bytes_per_key),
+      deletion_triggered_flush_threshold(
+          mutable_cf_options.deletion_triggered_flush_threshold) {}
 
 MemTable::MemTable(const InternalKeyComparator& cmp,
                    const ImmutableOptions& ioptions,
@@ -170,6 +172,15 @@ size_t MemTable::ApproximateMemoryUsage() {
 }
 
 bool MemTable::ShouldFlushNow() {
+  if (moptions_.deletion_triggered_flush_threshold > 0) {
+    uint64_t num_deletes = num_deletes_.load(std::memory_order_relaxed);
+    uint64_t data_size = data_size_.load(std::memory_order_relaxed);
+    if (data_size > (1 << 20) &&
+        num_deletes >= moptions_.deletion_triggered_flush_threshold) {
+      return true;
+    }
+  }
+
   size_t write_buffer_size = write_buffer_size_.load(std::memory_order_relaxed);
   // In a lot of times, we cannot allocate arena blocks that exactly matches the
   // buffer size. Thus we have to decide if we should over-allocate or

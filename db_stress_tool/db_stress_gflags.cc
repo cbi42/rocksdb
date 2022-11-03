@@ -1081,4 +1081,7 @@ DEFINE_uint32(
     "benefits iterator performance "
     " if there tends to be long consecutive sequences of point tombstones.");
 
+DEFINE_uint64(deletion_triggered_flush_threshold, 0,
+              "Memtabl is marked for flush when the number of point tombstones "
+              "exceeds this number. 0 means disabled.");
 #endif  // GFLAGS

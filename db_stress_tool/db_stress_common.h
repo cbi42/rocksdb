@@ -326,6 +326,7 @@ DECLARE_uint64(max_auto_readahead_size);
 DECLARE_uint64(num_file_reads_for_auto_readahead);
 
 DECLARE_uint32(tombstone_conversion_threshold);
+DECLARE_uint64(deletion_triggered_flush_threshold);
 
 constexpr long KB = 1024;
 constexpr int kRandomValueMaxFactor = 3;

@@ -3300,6 +3300,8 @@ void InitializeOptionsFromFlags(
 
   options.allow_data_in_errors = FLAGS_allow_data_in_errors;
   options.tombstone_conversion_threshold = FLAGS_tombstone_conversion_threshold;
+  options.deletion_triggered_flush_threshold =
+      FLAGS_deletion_triggered_flush_threshold;
 }
 
 void InitializeOptionsGeneral(
