@@ -172,7 +172,7 @@ Status TryConvertPointToRangeTombstone(
     end_keys.emplace_back(back_user_key.data(), back_user_key.size());
     seqs.emplace_back(max_seq);
     tombstone_converted_count += tombstones.size();
-    tombstone_dropped_count = tombstone_converted_count;
+    tombstone_dropped_count += tombstones.size();
     // Find the largest snapshot less than max_seq given that `snapshots` is
     // ascending. Emit tombstones that are visible to some snapshot.
     auto snapshot = std::upper_bound(snapshots.rbegin(), snapshots.rend(),
