@@ -114,7 +114,9 @@ Status TryConvertPointToRangeTombstone(
     OutputValidator& output_validator, TableBuilder* builder,
     FileMetaData* meta, const Env::IOPriority& io_priority,
     std::unique_ptr<Iterator>& db_iter, std::string& last_seek_result,
-    bool& db_iter_reached_end, CompactionIterator& c_iter, bool& at_next_key) {
+    bool& db_iter_reached_end, CompactionIterator& c_iter, bool& at_next_key,
+    uint64_t& tombstone_converted_count, uint64_t& tombstone_dropped_count,
+    uint64_t& try_convert_succ, uint64_t& try_convert_fail) {
   Status s;
   const auto ucmp = cfd->user_comparator();
   Slice front_user_key = ExtractUserKey(tombstones.front());
@@ -139,6 +141,7 @@ Status TryConvertPointToRangeTombstone(
   Slice back_user_key = ExtractUserKey(tombstones.back());
   if (db_iter_reached_end ||
       ucmp->Compare(last_seek_result, back_user_key) > 0) {
+    try_convert_succ++;
     // There is no keys from older level that is logically visble in range
     // covered by `tombstones`
     SequenceNumber max_seq = 0;
@@ -168,6 +171,8 @@ Status TryConvertPointToRangeTombstone(
     start_keys.emplace_back(front_user_key.data(), front_user_key.size());
     end_keys.emplace_back(back_user_key.data(), back_user_key.size());
     seqs.emplace_back(max_seq);
+    tombstone_converted_count += tombstones.size();
+    tombstone_dropped_count = tombstone_converted_count;
     // Find the largest snapshot less than max_seq given that `snapshots` is
     // ascending. Emit tombstones that are visible to some snapshot.
     auto snapshot = std::upper_bound(snapshots.rbegin(), snapshots.rend(),
@@ -182,6 +187,7 @@ Status TryConvertPointToRangeTombstone(
           s = AddKeyValueToOutput(output_validator, k, "" /* value */, builder,
                                   meta, io_priority, k_seq,
                                   ExtractValueType(k));
+          tombstone_dropped_count -= 1;
           if (!s.ok()) {
             return s;
           }
@@ -195,6 +201,7 @@ Status TryConvertPointToRangeTombstone(
                             GetInternalKeySeqno(tombstones.back()),
                             ExtractValueType(tombstones.back()));
   } else {
+    try_convert_fail++;
     // TODO: it is not necessary to flush all tombstones here. Say we cannot
     //  convert 1, 3 to [1, 3) due to lower level having point key 2. We can
     //  just flush point tombstone 1 here, and continue buffering tombstones
@@ -385,6 +392,10 @@ Status BuildTable(
       ro.total_order_seek = true;
       db_iter.reset(db->NewInternalIterator(ro, cfd, *mems));
     }
+    uint64_t tombstone_converted_count = 0;
+    uint64_t tombstone_dropped_count = 0;
+    uint64_t try_convert_succ = 0;
+    uint64_t try_convert_fail = 0;
 
     c_iter.SeekToFirst();
     for (; c_iter.Valid(); c_iter.Next()) {
@@ -402,7 +413,9 @@ Status BuildTable(
             s = TryConvertPointToRangeTombstone(
                 tombstones, cfd, start_keys, end_keys, seqs, snapshots,
                 output_validator, builder, meta, io_priority, db_iter,
-                last_seek_result, db_iter_reached_end, c_iter, at_next_key);
+                last_seek_result, db_iter_reached_end, c_iter, at_next_key,
+                tombstone_converted_count, tombstone_dropped_count,
+                try_convert_succ, try_convert_fail);
             tombstones.clear();
             if (!s.ok()) {
               break;
@@ -489,6 +502,13 @@ Status BuildTable(
                                          tombstone.seq_,
                                          tboptions.internal_comparator);
         }
+      }
+      if (try_convert) {
+        Statistics* stats = ioptions.stats;
+        RecordTick(stats, NUMBER_DB_PREV, tombstone_converted_count);
+        RecordTick(stats, NUMBER_DB_PREV_FOUND, tombstone_dropped_count);
+        RecordTick(stats, BLOCK_CACHE_COMPRESSED_HIT, try_convert_succ);
+        RecordTick(stats, BLOCK_CACHE_COMPRESSED_MISS, try_convert_fail);
       }
     }
 
