@@ -784,7 +784,10 @@ def whitebox_crash_main(args, unknown_args):
     kill_random_test = cmd_params["random_kill_odd"]
     kill_mode = 0
     prev_compaction_style = -1
+    next_level_dynamic = False
     while time.time() < exit_time:
+        cmd_params["level_compaction_dynamic_level_bytes"] = next_level_dynamic
+        next_level_dynamic = not cmd_params["level_compaction_dynamic_level_bytes"]
         if check_mode == 0:
             additional_opts = {
                 # use large ops per thread since we will kill it anyway
@@ -833,14 +836,15 @@ def whitebox_crash_main(args, unknown_args):
                 "ops_per_thread": cmd_params["ops_per_thread"],
                 "compaction_style": 1,
             }
-            # Single level universal has a lot of special logic. Ensure we cover
-            # it sometimes.
-            if random.randint(0, 1) == 1:
-                additional_opts.update(
-                    {
-                        "num_levels": 1,
-                    }
-                )
+            # Not changing number of levels
+            # # Single level universal has a lot of special logic. Ensure we cover
+            # # it sometimes.
+            # if random.randint(0, 1) == 1:
+            #     additional_opts.update(
+            #         {
+            #             "num_levels": 1,
+            #         }
+            #     )
         elif check_mode == 2:
             # normal run with FIFO compaction mode
             # ops_per_thread is divided by 5 because FIFO compaction
@@ -849,6 +853,7 @@ def whitebox_crash_main(args, unknown_args):
                 "kill_random_test": None,
                 "ops_per_thread": cmd_params["ops_per_thread"] // 5,
                 "compaction_style": 2,
+                "destroy_db_initially": 1,
             }
         else:
             # normal run
@@ -858,9 +863,9 @@ def whitebox_crash_main(args, unknown_args):
             }
 
         cur_compaction_style = additional_opts.get("compaction_style", cmd_params.get("compaction_style", 0))
-        if prev_compaction_style != -1 and prev_compaction_style != cur_compaction_style:
-            print("`compaction_style` is changed in current run so `destroy_db_initially` is set to 1 as a short-term solution to avoid cycling through previous db of different compaction style." + "\n")
-            additional_opts["destroy_db_initially"] = 1
+        # if prev_compaction_style != -1 and prev_compaction_style != cur_compaction_style:
+        #     print("`compaction_style` is changed in current run so `destroy_db_initially` is set to 1 as a short-term solution to avoid cycling through previous db of different compaction style." + "\n")
+        #     # additional_opts["destroy_db_initially"] = 1
         prev_compaction_style = cur_compaction_style
 
         cmd = gen_cmd(
