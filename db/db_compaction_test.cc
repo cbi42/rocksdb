@@ -9248,6 +9248,10 @@ TEST_F(DBCompactionTest, TurnOnLevelCompactionDynamicLevelBytesUCToLC) {
   }
   expected_lsm += "1";
   ASSERT_EQ(expected_lsm, FilesPerLevel(1));
+
+  // Tests that entries for trial move in MANIFEST should be valid
+  ReopenWithColumnFamilies({"default", "pikachu"}, options);
+  ASSERT_EQ(expected_lsm, FilesPerLevel(1));
 }
 
 }  // namespace ROCKSDB_NAMESPACE
