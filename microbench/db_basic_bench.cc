@@ -3,6 +3,7 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
+#include <cstdint>
 #ifndef OS_WIN
 #include <unistd.h>
 #endif  // ! OS_WIN
@@ -1575,6 +1576,171 @@ BENCHMARK(RandomAccessFileReaderRead)
     ->Arg(1)
     ->ArgName("enable_statistics");
 
+static Status MoveFilesToLevel(DBImpl* db_impl, int level) {
+  Status s;
+  for (int l = 0; l < level; ++l) {
+    s = db_impl->TEST_CompactRange(l, nullptr, nullptr);
+    if (!s.ok()) {
+      return s;
+    }
+  }
+  return s;
+}
+
+static void IteratorNextWithRangeTombstone(benchmark::State& state) {
+  uint64_t key_size = state.range(0);
+  uint64_t val_size = 100;
+  uint64_t num_keys_under_range_tombstone = state.range(1);
+  bool use_point_delete = state.range(2);
+  uint64_t num_keys = num_keys_under_range_tombstone + 5;
+  // setup DB
+  static std::unique_ptr<DB> db;
+  Options options;
+  options.compaction_style = kCompactionStyleLevel;
+  options.level_compaction_dynamic_level_bytes = false;
+  options.num_levels = 7;
+  options.disable_auto_compactions = true;
+
+  auto rnd = Random(301 + state.thread_index());
+  KeyGenerator kg(num_keys /* max_key */, key_size);
+  // L0:          K1, [K2, K3 + X), K3+X
+  // L1..L5: KMin,                             KMax
+  // L6:                   K3, .., K3+X-1  K3+X
+  //
+  // Let X = num_keys_under_range_tombstone.
+  // L0 contains a range tombstone that covers X keys from L6
+  // L1 to L5 contains min key and max key meaning a key before and a key after
+  // the key range of L0 and L6 to mimik the scenario that L1 and L5 have valid
+  // keys before and after.
+  // Do Seek on K1 will lands on K1 from L0/
+  // Then do Next, we will see K3 from L0 as range tombstone start key,
+  // then K3 from L6 which can trigger a range del reseek into L6.
+
+  // K1
+  Slice slice = kg.Next();
+  std::string seek_key(slice.data(), slice.size());
+  // K2
+  slice = kg.Next();
+  std::string range_del_start(slice.data(), slice.size());
+
+  if (state.thread_index() == 0) {
+    SetupDB(state, options, &db, "IteratorNext");
+    DBImpl* db_full = static_cast_with_check<DBImpl>(db.get());
+
+    // L6
+    Status s;
+    std::string range_del_end;
+    std::vector<std::string> deleted_keys;
+    // K3 .. K3+X-1
+    for (uint64_t i = 0; i < num_keys_under_range_tombstone; i++) {
+      slice = kg.Next();
+      deleted_keys.emplace_back(slice.data(), slice.size());
+      s = db->Put(WriteOptions(), slice,
+                  rnd.RandomString(static_cast<int>(val_size)));
+      if (!s.ok()) {
+        state.SkipWithError(s.ToString().c_str());
+      }
+    }
+
+    // K3+X
+    slice = kg.Next();
+    range_del_end.assign(slice.data(), slice.size());
+    s = db->Put(WriteOptions(), slice,
+                rnd.RandomString(static_cast<int>(val_size)));
+    s = db->Flush(FlushOptions());
+
+    if (!s.ok()) {
+      state.SkipWithError(s.ToString().c_str());
+    }
+    s = MoveFilesToLevel(db_full, 6);
+    if (!s.ok()) {
+      state.SkipWithError(s.ToString().c_str());
+    }
+
+    char min_buff[500];
+    slice = kg.MinKey(min_buff);
+    std::string min_key, max_key;
+    min_key.assign(slice.data(), slice.size());
+    char max_key_buf[500];
+    Slice max_key_slice = kg.MaxKey(max_key_buf);
+    // L5 - L1
+    for (int level = 5; level > 0; --level) {
+      s = db->Put(WriteOptions(), min_key, rnd.RandomString(val_size));
+      s = db->Put(WriteOptions(), max_key_slice, rnd.RandomString(val_size));
+      s = db->Flush(FlushOptions());
+      s = MoveFilesToLevel(db_full, level);
+    }
+
+    // L0
+    if (!use_point_delete) {
+      // [K2, K3 + X)
+      s = db->DeleteRange(WriteOptions(), db->DefaultColumnFamily(),
+                          range_del_start, range_del_end);
+    } else {
+      // When num_keys_under_range_tombstone is 0, we still issue an empty
+      // delete range or an obsolete tombstone to check their effect on iterator
+      // performance. K2
+      s = db->Delete(WriteOptions(), range_del_start);
+      // K3..K3+X-1
+      for (const auto& str : deleted_keys) {
+        s = db->Delete(WriteOptions(), str);
+        if (!s.ok()) {
+          state.SkipWithError(s.ToString().c_str());
+        }
+      }
+    }
+
+    s = db->Flush(FlushOptions());
+
+    std::string property;
+    for (int level = 0; level < 7; level++) {
+      db->GetProperty("rocksdb.num-files-at-level" + std::to_string(level),
+                      &property);
+      if (atoi(property.c_str()) < 1) {
+        state.SkipWithError("Not enough files");
+      }
+    }
+  }
+
+  get_perf_context()->Reset();
+  for (auto _ : state) {
+    std::unique_ptr<Iterator> iter{nullptr};
+    state.PauseTiming();
+    iter.reset(db->NewIterator(ReadOptions()));
+    iter->Seek(seek_key);
+    state.ResumeTiming();
+    iter->Next();
+  }
+
+  // Sanity check that we issue exactly 1 reseek
+  state.counters["range del reseek"] = benchmark::Counter(
+      static_cast<double>(get_perf_context()->internal_range_del_reseek_count),
+      benchmark::Counter::kAvgIterations);
+
+  if (state.thread_index() == 0) {
+    TeardownDB(state, db, options, kg);
+  }
+}
+
+static void IteratorNextWithRangeTombstoneArguments(
+    benchmark::internal::Benchmark* b) {
+  for (int key_size : {50, 100, 200}) {
+    for (int num_keys_under_range_tombstone :
+         {0, 1, 2, 3, 4, 5, 10, 100, 1000}) {
+      for (bool use_point_delete : {false, true}) {
+        b->Args({key_size, num_keys_under_range_tombstone, use_point_delete});
+      }
+    }
+  }
+  b->ArgNames(
+      {"key_size", "num_keys_under_range_tombstone", "use_point_delete"});
+}
+
+static constexpr uint64_t kIteratorNextWithRangeTombstoneNum = 10000l /* 1M */;
+BENCHMARK(IteratorNextWithRangeTombstone)
+    // ->Threads(1)
+    ->Iterations(kIteratorNextWithRangeTombstoneNum)
+    ->Apply(IteratorNextWithRangeTombstoneArguments);
 }  // namespace ROCKSDB_NAMESPACE
 
 BENCHMARK_MAIN();

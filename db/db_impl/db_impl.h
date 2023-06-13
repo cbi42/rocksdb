@@ -1061,11 +1061,11 @@ class DBImpl : public DB {
   Status WaitForCompact(
       const WaitForCompactOptions& wait_for_compact_options) override;
 
-#ifndef NDEBUG
   // Compact any files in the named level that overlap [*begin, *end]
   Status TEST_CompactRange(int level, const Slice* begin, const Slice* end,
                            ColumnFamilyHandle* column_family = nullptr,
                            bool disallow_trivial_move = false);
+#ifndef NDEBUG
 
   Status TEST_SwitchWAL();
 

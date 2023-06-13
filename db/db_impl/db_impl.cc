@@ -6129,4 +6129,26 @@ void DBImpl::RecordSeqnoToTimeMapping() {
   }
 }
 
+Status DBImpl::TEST_CompactRange(int level, const Slice* begin,
+                                 const Slice* end,
+                                 ColumnFamilyHandle* column_family,
+                                 bool disallow_trivial_move) {
+  ColumnFamilyData* cfd;
+  if (column_family == nullptr) {
+    cfd = default_cf_handle_->cfd();
+  } else {
+    auto cfh = static_cast_with_check<ColumnFamilyHandleImpl>(column_family);
+    cfd = cfh->cfd();
+  }
+  int output_level =
+      (cfd->ioptions()->compaction_style == kCompactionStyleUniversal ||
+       cfd->ioptions()->compaction_style == kCompactionStyleFIFO)
+          ? level
+          : level + 1;
+  return RunManualCompaction(
+      cfd, level, output_level, CompactRangeOptions(), begin, end, true,
+      disallow_trivial_move,
+      std::numeric_limits<uint64_t>::max() /*max_file_num_to_ignore*/,
+      "" /*trim_ts*/);
+}
 }  // namespace ROCKSDB_NAMESPACE
