@@ -8,6 +8,17 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 #pragma once
 
+#ifndef DEBUG_PRINT_H
+#define DEBUG_PRINT_H
+#ifdef DEBUG_PRINT_FLAG
+#define DEBUG_PRINT(format, ...) fprintf(stderr, format, __VA_ARGS__)
+#else
+#define DEBUG_PRINT(format, ...) \
+  do {                           \
+  } while (0)
+#endif
+#endif  // DEBUG_PRINT_
+
 #include <atomic>
 #include <deque>
 #include <functional>

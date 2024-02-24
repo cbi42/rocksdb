@@ -19,6 +19,42 @@ class NonBatchedOpsStressTest : public StressTest {
  public:
   NonBatchedOpsStressTest() = default;
 
+  Status TestCustomOperations(
+      ThreadState* thread,
+      const std::vector<int>& /* rand_column_families */) override {
+    auto shared = thread->shared;
+    const int64_t tid = thread->tid;
+    const int64_t max_key = thread->shared->GetMaxKey();
+    const int64_t keys_per_thread = max_key / shared->GetNumThreads();
+    int64_t start = keys_per_thread * thread->tid;
+    int64_t end = start + keys_per_thread;
+    if (tid == shared->GetNumThreads() - 1) {
+      end = max_key;
+    }
+
+    static Random rand(shared->GetSeed());
+    // This thread will write large batch within [start, end)
+    // num keys is 1024 size of value is 1024 -> this gives > 1MB batch
+    const int num_key = 1024;
+    const int val_size = 1024;
+    int64_t start_key = start + rand.Uniform(end - start - num_key);
+    WriteBatch wb;
+    std::vector<std::string> values;
+    for (int64_t key = start_key; key < start_key + num_key; ++key) {
+      values.emplace_back(std::move(rand.RandomString(val_size)));
+      assert(wb.Put(std::to_string(key), values.back()).ok());
+    }
+    assert(db_->Write(rocksdb::WriteOptions(), &wb).ok());
+    // Read back from DB and verify if it's correct.
+    for (int64_t key = start_key; key < start_key + num_key; ++key) {
+      std::string value;
+      auto s = db_->Get(rocksdb::ReadOptions(), std::to_string(key), &value);
+      assert(s.ok());
+      assert(value == values[key - start_key]);
+    }
+    return Status::OK();
+  }
+
   virtual ~NonBatchedOpsStressTest() = default;
 
   void VerifyDb(ThreadState* thread) const override {

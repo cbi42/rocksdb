@@ -313,6 +313,15 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
                               log_ref, disable_memtable, seq_used);
   }
 
+  // Preprocess WriteBatch
+
+#ifdef DEBUG_PRINT_FLAG
+  for (const auto& offset_size : my_batch->offset_to_size) {
+    DEBUG_PRINT("offset %d, size %d\n", (int)offset_size.first,
+                (int)offset_size.second);
+  }
+#endif
+
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
   WriteThread::Writer w(write_options, my_batch, callback, log_ref,
                         disable_memtable, batch_cnt, pre_release_callback,
@@ -557,16 +566,95 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
 
     if (status.ok()) {
-      PERF_TIMER_GUARD(write_memtable_time);
+      PERF_TIMER_FOR_WAIT_GUARD(write_memtable_time);
 
+      DEBUG_PRINT("Write group  size %d\n", (int)write_group.size);
       if (!parallel) {
-        // w.sequence will be set inside InsertInto
-        w.status = WriteBatchInternal::InsertInto(
-            write_group, current_sequence, column_family_memtables_.get(),
-            &flush_scheduler_, &trim_history_scheduler_,
-            write_options.ignore_missing_column_families,
-            0 /*recovery_log_number*/, this, parallel, seq_per_batch_,
-            batch_per_txn_);
+        // If a write batch is larger than max write group batch size,
+        // it is likely the only memtable in the group.
+        const bool parallel_single_write_batch =
+            write_group.size == 1
+            //                && w.batch->GetDataSize() >=
+            //                immutable_db_options_.max_write_batch_group_size_bytes
+            && w.batch->Count() >= 100;
+        // TODO: new flow only under new option
+        if (parallel_single_write_batch) {
+          DEBUG_PRINT("%s", "Parallel\n");
+          // Only a single write.
+          //
+          // Find split point.
+          //  TODO: is range del part of write batch?
+          //  TODO: given offset -> size, find 9 offsets where
+          //    offset[0] is the begin of the write batch after header?
+          //    offset[>0] is such that between each offset there is about equal
+          //    amount of work to insert into memtable.
+          //
+          //  TODO: how many threads? by # of elements?
+          const size_t kNumThreads = 8;
+          const size_t op_count = w.batch->Count();
+          DEBUG_PRINT("op_count %d offset_to_size %d\n", (int)op_count,
+                      (int)w.batch->offset_to_size.size());
+          //          assert(op_count == w.batch->offset_to_size.size());
+          std::vector<size_t> subbatch_boundaries;
+          std::vector<size_t> num_ops_per_thread;
+          subbatch_boundaries.reserve(kNumThreads + 1);
+          num_ops_per_thread.reserve(kNumThreads);
+          assert(w.batch->offset_to_size.size() >= kNumThreads);
+          subbatch_boundaries[0] = w.batch->offset_to_size[0].first;
+          for (size_t i = 1; i < kNumThreads; ++i) {
+            subbatch_boundaries[i] =
+                w.batch->offset_to_size[op_count / kNumThreads * i].first;
+            num_ops_per_thread[i - 1] = op_count / kNumThreads;
+          }
+          subbatch_boundaries[kNumThreads] = w.batch->GetDataSize();
+          num_ops_per_thread[kNumThreads - 1] =
+              op_count - op_count / kNumThreads * (kNumThreads - 1);
+          // Each thread i processes [subbatch_boundaries[i],
+          // subbatch_boundaries[i])
+
+          // For each split point range, assign a writer and write.
+          //  TODO: need a new version of ParallelInsertInto that takes in write
+          //  batch start and end
+          std::vector<port::Thread> insert_threads;
+          insert_threads.reserve(kNumThreads);
+          //        WriteBatch* wb = write_group.leader->batch;
+          //        assert(wb->offset_to_size.size() == wb->Count());
+          std::vector<Status> statuses;
+          statuses.resize(kNumThreads);
+          std::vector<ColumnFamilyMemTablesImpl> column_family_memtables;
+          column_family_memtables.reserve(kNumThreads);
+
+          SequenceNumber sq = current_sequence;
+          DEBUG_PRINT("Write batch size %d\n", (int)w.batch->GetDataSize());
+          for (size_t i = 0; i < kNumThreads; ++i) {
+            // TODO: specify write batch boundary
+            // TODO: update writer sequence number
+            column_family_memtables.emplace_back(
+                versions_->GetColumnFamilySet());
+            insert_threads.emplace_back(
+                &WriteBatchInternal::ParallelInsertInto, subbatch_boundaries[i],
+                subbatch_boundaries[i + 1], &w, sq,
+                &column_family_memtables.back(), &flush_scheduler_,
+                &trim_history_scheduler_,
+                write_options.ignore_missing_column_families,
+                0 /*recovery_log_number*/, this, true, seq_per_batch_,
+                batch_per_txn_);
+            sq += num_ops_per_thread[i];
+          }
+
+          for (size_t i = 0; i < kNumThreads; ++i) {
+            insert_threads[i].join();
+          }
+        } else {
+          // w.sequence will be set inside InsertInto
+          // WriteBatchInternal::InsertIntoParallel()
+          w.status = WriteBatchInternal::InsertInto(
+              write_group, current_sequence, column_family_memtables_.get(),
+              &flush_scheduler_, &trim_history_scheduler_,
+              write_options.ignore_missing_column_families,
+              0 /*recovery_log_number*/, this, parallel, seq_per_batch_,
+              batch_per_txn_);
+        }
       } else {
         write_group.last_sequence = last_sequence;
         write_thread_.LaunchParallelMemTableWriters(&write_group);

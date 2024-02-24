@@ -458,6 +458,8 @@ class WriteBatch : public WriteBatchBase {
   struct ProtectionInfo;
   size_t GetProtectionBytesPerKey() const;
 
+  std::vector<std::pair<size_t, size_t>> offset_to_size;
+
  private:
   friend class WriteBatchInternal;
   friend class LocalSavePoint;

@@ -247,6 +247,7 @@ bool WriteBatch::Handler::Continue() { return true; }
 void WriteBatch::Clear() {
   rep_.clear();
   rep_.resize(WriteBatchInternal::kHeader);
+  offset_to_size.clear();
 
   content_flags_.store(0, std::memory_order_relaxed);
 
@@ -507,7 +508,11 @@ Status WriteBatchInternal::Iterate(const WriteBatch* wb,
   uint32_t column_family = 0;  // default
   bool last_was_try_again = false;
   bool handler_continue = true;
+  size_t input_size = input.size();
+  // defined a macro
+  DEBUG_PRINT("write batch size %d\n", (int)wb->Count());
   while (((s.ok() && !input.empty()) || UNLIKELY(s.IsTryAgain()))) {
+    DEBUG_PRINT("Inserting offset: %d\n", (int)begin);
     handler_continue = handler->Continue();
     if (!handler_continue) {
       break;
@@ -534,6 +539,8 @@ Status WriteBatchInternal::Iterate(const WriteBatch* wb,
       last_was_try_again = true;
       s = Status::OK();
     }
+    begin += input_size - input.size();
+    input_size = input.size();
 
     switch (tag) {
       case kTypeColumnFamilyValue:
@@ -541,6 +548,7 @@ Status WriteBatchInternal::Iterate(const WriteBatch* wb,
         assert(wb->content_flags_.load(std::memory_order_relaxed) &
                (ContentFlags::DEFERRED | ContentFlags::HAS_PUT));
         s = handler->PutCF(column_family, key, value);
+        DEBUG_PRINT("Put %s\n", key.ToString(true).c_str());
         if (LIKELY(s.ok())) {
           empty_batch = false;
           found++;
@@ -843,7 +851,16 @@ Status WriteBatch::Put(ColumnFamilyHandle* column_family, const Slice& key,
   }
 
   if (0 == ts_sz) {
-    return WriteBatchInternal::Put(this, cf_id, key, value);
+    size_t begin_offset = rep_.size();
+    s = WriteBatchInternal::Put(this, cf_id, key, value);
+    if (s.ok()) {
+      offset_to_size.emplace_back(begin_offset, rep_.size() - begin_offset);
+      //      fprintf(stdout, "begin_offset %d, size %d, key %s\n", (int)
+      //      begin_offset, (int) (rep_.size() - begin_offset),
+      //      key.ToString(true).c_str());
+    }
+    return s;
+    //    return WriteBatchInternal::Put(this, cf_id, key, value);
   }
 
   needs_in_place_update_ts_ = true;
@@ -2924,6 +2941,25 @@ class MemTableInserter : public WriteBatch::Handler {
 };
 
 }  // anonymous namespace
+
+Status WriteBatchInternal::ParallelInsertInto(
+    size_t begin, size_t end, WriteThread::Writer* w, SequenceNumber sequence,
+    ColumnFamilyMemTables* memtables, FlushScheduler* flush_scheduler,
+    TrimHistoryScheduler* trim_history_scheduler,
+    bool ignore_missing_column_families, uint64_t recovery_log_number, DB* db,
+    bool concurrent_memtable_writes, bool seq_per_batch, bool batch_per_txn) {
+  DEBUG_PRINT("ParallelInsertInto begin %d, %d end\n", (int)begin, (int)end);
+  MemTableInserter inserter(
+      sequence, memtables, flush_scheduler, trim_history_scheduler,
+      ignore_missing_column_families, recovery_log_number, db,
+      concurrent_memtable_writes, nullptr /* prot_info */,
+      nullptr /*has_valid_writes*/, seq_per_batch, batch_per_txn);
+  inserter.set_log_number_ref(w->log_ref);
+  inserter.set_prot_info(w->batch->prot_info_.get());
+  Status s = WriteBatchInternal::Iterate(w->batch, &inserter, begin, end);
+  inserter.PostProcess();
+  return s;
+}
 
 // This function can only be called in these conditions:
 // 1) During Recovery()

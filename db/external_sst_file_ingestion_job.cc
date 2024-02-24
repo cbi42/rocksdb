@@ -389,6 +389,7 @@ Status ExternalSstFileIngestionJob::Run() {
     if (ingestion_options_.ingest_behind) {
       status = CheckLevelForIngestedBehindFile(&f);
     } else {
+      // assigned_seqno = last_seqno + 1
       status = AssignLevelAndSeqnoForIngestedFile(
           super_version, force_global_seqno, cfd_->ioptions()->compaction_style,
           last_seqno, &f, &assigned_seqno);
