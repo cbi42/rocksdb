@@ -445,7 +445,7 @@ Status MultiOpsTxnsStressTest::TestPut(ThreadState* /*thread*/,
                                        const ReadOptions& /*read_opts*/,
                                        const std::vector<int>& /*cf_ids*/,
                                        const std::vector<int64_t>& /*keys*/,
-                                       char (&value)[100]) {
+                                       char (&value)[kValueMaxLen]) {
   (void)value;
   return Status::NotSupported();
 }

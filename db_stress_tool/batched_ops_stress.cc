@@ -25,7 +25,7 @@ class BatchedOpsStressTest : public StressTest {
                  const ReadOptions& /* read_opts */,
                  const std::vector<int>& rand_column_families,
                  const std::vector<int64_t>& rand_keys,
-                 char (&value)[100]) override {
+                 char (&value)[kValueMaxLen]) override {
     assert(!rand_column_families.empty());
     assert(!rand_keys.empty());
 

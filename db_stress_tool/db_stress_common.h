@@ -419,7 +419,7 @@ DECLARE_uint32(uncache_aggressiveness);
 
 constexpr long KB = 1024;
 constexpr int kRandomValueMaxFactor = 3;
-constexpr int kValueMaxLen = 100;
+constexpr int kValueMaxLen = 5 << 20;  // 50MB
 constexpr uint32_t kLargePrimeForCommonFactorSkew = 1872439133;
 
 // wrapped posix environment

@@ -235,7 +235,8 @@ class MultiOpsTxnsStressTest : public StressTest {
 
   Status TestPut(ThreadState* thread, WriteOptions& write_opts,
                  const ReadOptions& read_opts, const std::vector<int>& cf_ids,
-                 const std::vector<int64_t>& keys, char (&value)[100]) override;
+                 const std::vector<int64_t>& keys,
+                 char (&value)[kValueMaxLen]) override;
 
   Status TestDelete(ThreadState* thread, WriteOptions& write_opts,
                     const std::vector<int>& rand_column_families,

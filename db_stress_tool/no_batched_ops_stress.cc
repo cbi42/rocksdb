@@ -735,7 +735,7 @@ class NonBatchedOpsStressTest : public StressTest {
         return true;
       }
       const ExpectedValue& expected = ryw_expected_value.value();
-      char expected_value[100];
+      char expected_value[kValueMaxLen];
       if (s.ok() &&
           ExpectedValueHelper::MustHaveNotExisted(expected, expected)) {
         fprintf(stderr,
@@ -1315,7 +1315,7 @@ class NonBatchedOpsStressTest : public StressTest {
             return false;
           } else {
             const uint32_t value_base = ryw_expected_value.GetValueBase();
-            char expected_value[100];
+            char expected_value[kValueMaxLen];
             const size_t sz = GenerateValue(value_base, expected_value,
                                             sizeof(expected_value));
             const Slice expected_slice(expected_value, sz);
@@ -1546,7 +1546,7 @@ class NonBatchedOpsStressTest : public StressTest {
                  const ReadOptions& read_opts,
                  const std::vector<int>& rand_column_families,
                  const std::vector<int64_t>& rand_keys,
-                 char (&value)[100]) override {
+                 char (&value)[kValueMaxLen]) override {
     assert(!rand_column_families.empty());
     assert(!rand_keys.empty());
 
@@ -2029,7 +2029,7 @@ class NonBatchedOpsStressTest : public StressTest {
       values.push_back(value_base);
       pending_expected_values.push_back(pending_expected_value);
 
-      char value[100];
+      char value[kValueMaxLen];
       auto key_str = Key(key);
       const size_t value_len = GenerateValue(value_base, value, sizeof(value));
       const Slice k(key_str);
@@ -2731,7 +2731,7 @@ class NonBatchedOpsStressTest : public StressTest {
 
           const uint32_t value_base = put_value.GetValueBase();
 
-          char value[100];
+          char value[kValueMaxLen];
           const size_t sz = GenerateValue(value_base, value, sizeof(value));
           const Slice v(value, sz);
 

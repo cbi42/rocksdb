@@ -626,7 +626,7 @@ void StressTest::PreloadDbAndReopenAsReadOnly(int64_t number_of_keys,
   if (FLAGS_rate_limit_auto_wal_flush) {
     write_opts.rate_limiter_priority = Env::IO_USER;
   }
-  char value[100];
+  char value[kValueMaxLen];
   int cf_idx = 0;
   Status s;
   for (auto cfh : column_families_) {
@@ -912,7 +912,7 @@ void StressTest::OperateDb(ThreadState* thread) {
   write_opts.memtable_insert_hint_per_batch =
       FLAGS_memtable_insert_hint_per_batch;
   auto shared = thread->shared;
-  char value[100];
+  char value[kValueMaxLen];
   std::string from_db;
   if (FLAGS_sync) {
     write_opts.sync = true;
