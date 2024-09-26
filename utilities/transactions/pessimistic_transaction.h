@@ -167,6 +167,7 @@ class PessimisticTransaction : public TransactionBaseImpl {
   TxnTimestamp read_timestamp_{kMaxTxnTimestamp};
   TxnTimestamp commit_timestamp_{kMaxTxnTimestamp};
 
+  bool use_ingestion_;
  private:
   friend class TransactionTest_ValidateSnapshotTest_Test;
   // Used to create unique ids for transactions.
@@ -304,6 +305,10 @@ class WriteCommittedTxn : public PessimisticTransaction {
   Status SetCommitTimestamp(TxnTimestamp ts) override;
   TxnTimestamp GetCommitTimestamp() const override { return commit_timestamp_; }
 
+  Status PersistForCommit(
+      const EnvOptions& env_options, const std::vector<Options*>& options,
+      const std::vector<ColumnFamilyHandle*>& column_family) override;
+
  private:
   template <typename TValue>
   Status GetForUpdateImpl(const ReadOptions& read_options,
@@ -340,6 +345,9 @@ class WriteCommittedTxn : public PessimisticTransaction {
   // true, then the corresponding column family is not added to cfs_with_ts
   // even if it enables timestamp.
   std::unordered_set<uint32_t> cfs_with_ts_tracked_when_indexing_disabled_;
+
+  std::vector<ExternalSstFileInfo> to_ingest_files_;
+  std::vector<ColumnFamilyHandle*> cf_handles_;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

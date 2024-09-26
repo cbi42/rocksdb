@@ -108,7 +108,8 @@ struct SstFileWriter::Rep {
     assert(value_type == kTypeValue || value_type == kTypeMerge ||
            value_type == kTypeDeletion ||
            value_type == kTypeDeletionWithTimestamp ||
-           value_type == kTypeWideColumnEntity);
+           value_type == kTypeWideColumnEntity ||
+           value_type == kTypeSingleDeletion);
 
     constexpr SequenceNumber sequence_number = 0;
 
@@ -449,6 +450,10 @@ Status SstFileWriter::Merge(const Slice& user_key, const Slice& value) {
 
 Status SstFileWriter::Delete(const Slice& user_key) {
   return rep_->Add(user_key, Slice(), ValueType::kTypeDeletion);
+}
+
+Status SstFileWriter::SingleDelete(const Slice& user_key) {
+  return rep_->Add(user_key, Slice(), ValueType::kTypeSingleDeletion);
 }
 
 Status SstFileWriter::Delete(const Slice& user_key, const Slice& timestamp) {

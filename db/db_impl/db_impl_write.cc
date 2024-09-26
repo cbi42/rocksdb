@@ -198,7 +198,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
                          uint64_t log_ref, bool disable_memtable,
                          uint64_t* seq_used, size_t batch_cnt,
                          PreReleaseCallback* pre_release_callback,
-                         PostMemTableCallback* post_memtable_callback) {
+                         PostMemTableCallback* post_memtable_callback,
+                         uint64_t reserve_seqno_count) {
   assert(!seq_per_batch_ || batch_cnt != 0);
   assert(my_batch == nullptr || my_batch->Count() == 0 ||
          write_options.protection_bytes_per_key == 0 ||
@@ -498,6 +499,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // memtable it still consumes a seq. Otherwise, if !seq_per_batch_, we inc
     // the seq per valid written key to mem.
     size_t seq_inc = seq_per_batch_ ? valid_batches : total_count;
+    seq_inc += reserve_seqno_count;
 
     const bool concurrent_update = two_write_queues_;
     // Update stats while we are an exclusive group leader, so we know
@@ -2264,6 +2266,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     }
   }
   if (s.ok()) {
+    // SwitchMemtable here assigns seq as latest sequence number
     SequenceNumber seq = versions_->LastSequence();
     new_mem = cfd->ConstructNewMemtable(mutable_cf_options, seq);
     context->superversion_context.NewSuperVersion();
@@ -2402,6 +2405,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
 
   cfd->mem()->SetNextLogNumber(logfile_number_);
   assert(new_mem != nullptr);
+  // Here we need to do something similar to add a new memtable to cfd->imm()
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
   new_mem->Ref();
   cfd->SetMemtable(new_mem);

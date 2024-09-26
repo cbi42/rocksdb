@@ -5720,7 +5720,7 @@ Status DBImpl::GetLatestSequenceForKey(
     return Status::OK();
   }
 
-  // Check if there is a record for this key in the immutable memtables
+  // Check if there is a record for this key in the immutable memtables  // TODO: does ingestion work with this?
   sv->imm->GetFromHistory(lkey, /*value=*/nullptr, /*columns=*/nullptr,
                           timestamp, &s, &merge_context,
                           &max_covering_tombstone_seq, seq, read_options,
@@ -6051,6 +6051,26 @@ Status DBImpl::IngestExternalFiles(
         versions_->SetLastAllocatedSequence(last_seqno + consumed_seqno_count);
         versions_->SetLastPublishedSequence(last_seqno + consumed_seqno_count);
         versions_->SetLastSequence(last_seqno + consumed_seqno_count);
+        for (size_t i = 0; i != num_cfs; ++i) {
+          auto* cfd =
+           static_cast<ColumnFamilyHandleImpl*>(args[i].column_family)->cfd();
+          if (cfd->IsDropped()) {
+            continue;
+          }
+          if (need_flush[i]) {
+            assert(cfd->mem()->IsEmpty());
+            if (cfd->mem()->IsEmpty()) {
+              // TODO: this is still needed
+              cfd->mem()->SetEarliestSequenceNumber(last_seqno + consumed_seqno_count + 1);
+              // TODO: this is not needed when ingested table is an immutable memtable, and hence part of history
+              autovector<MemTable*> to_del;
+              cfd->imm()->TrimHistory(&to_del, 1 << 30);
+              for (auto* m : to_del) {
+                delete m;
+              }
+            }
+          }
+        }
       }
     }
 

@@ -44,6 +44,7 @@ PessimisticTransaction::PessimisticTransaction(
               ->GetLockTrackerFactory()),
       txn_db_impl_(nullptr),
       expiration_time_(0),
+      use_ingestion_(txn_options.use_file_ingestion),
       txn_id_(0),
       waiting_cf_id_(0),
       waiting_key_(nullptr),
@@ -103,6 +104,8 @@ void PessimisticTransaction::Initialize(const TransactionOptions& txn_options) {
 
   read_timestamp_ = kMaxTxnTimestamp;
   commit_timestamp_ = kMaxTxnTimestamp;
+
+  use_file_ingestion_ = txn_options.use_file_ingestion;
 }
 
 PessimisticTransaction::~PessimisticTransaction() {
@@ -748,6 +751,125 @@ Status PessimisticTransaction::Commit() {
   return s;
 }
 
+// Generate all the SST files
+// How to do non-blocking ingestion:
+  // 1. ingest file and read the file under the interface for immutable memtable
+  // 2. ingest a specially created memtable but all keys have 0 seqno
+  // 3. ingest the write batch directly, and read through WBWI
+  // 4. Do both
+Status WriteCommittedTxn::PersistForCommit(
+    const EnvOptions& env_options, const std::vector<Options*>& options,
+    const std::vector<ColumnFamilyHandle*>& column_family) {
+  if (GetWriteBatch()->HasDuplicateKeys()) {
+    fprintf(stdout, "Duplicated keys not supported, fall back to normal commit %s\n", GetName().c_str());
+    return Status::NotSupported("Duplicated keys not supported");
+  }
+  // Either a API comment or this or rely on SstFileWriter failing
+  // if (GetWriteBatch()->GetWriteBatch()->HasMerge()) {
+  //   return Status::NotSupported("Does not support Merge");
+  // }
+  // loop over write batch
+  // TODO: assert prepared not commited states
+  const std::unordered_set<uint32_t>& cf_ids =
+      GetWriteBatch()->GetColumnFamilyIDs();
+  // TODO: validate that input cfs are enough for cf_ids
+  Status s;
+  for (auto cf_id : cf_ids) {
+    size_t i = 0;
+    for (; i < column_family.size(); ++i) {
+      if (column_family[i]->GetID() == cf_id) {
+        break;
+      }
+    }
+    if (i >= column_family.size()) {
+      // TODO:
+      assert(false);
+    }
+    ColumnFamilyHandle* cf_handle = column_family[i];
+
+    // create file
+    // loop over cf and write to file
+
+    // Find the rigth option and column family
+    std::unique_ptr<WBWIIterator> iter{GetWriteBatch()->NewIterator(cf_handle)};
+    iter->SeekToFirst();
+    assert(iter->status().ok());
+    assert(iter->Valid());
+    if (!iter->Valid()) {
+      continue;
+    }
+    // create sst file writer
+    // TODO: what option?
+    SstFileWriter sst_file_writer(env_options, *options[i], cf_handle);
+    // TODO: need to remember file_path somewhere
+    const std::string file_path =
+        db_impl_->GetName() + "/transaction_ssts_" + std::to_string(GetID()) +
+        "_CF_" + std::to_string(cf_handle->GetID()) + ".sst";
+    fprintf(stdout, "Txn file path: %s\n", file_path.c_str());
+    s = sst_file_writer.Open(file_path);
+    if (!s.ok()) {
+      // TODO: clean up?
+      return s;
+    }
+
+    // TODO: sanity check duplicated records
+    // TODO: sanity check record types not allowed
+
+    // deal with unique keys
+    while (iter->Valid() && s.ok()) {
+      WriteEntry write_entry = iter->Entry();
+      switch (write_entry.type) {
+        case kPutRecord:
+          s = sst_file_writer.Put(write_entry.key, write_entry.value);
+          break;
+        case kMergeRecord:
+          s = sst_file_writer.Merge(write_entry.key, write_entry.value);
+          break;
+        case kDeleteRecord:
+          s = sst_file_writer.Delete(write_entry.key);
+          break;
+        case kSingleDeleteRecord:
+          // TODO: support single deelted
+          // sst_file_writer.Sin
+            s = sst_file_writer.SingleDelete(write_entry.key);
+          break;
+        case kDeleteRangeRecord:
+          s = sst_file_writer.DeleteRange(write_entry.key, write_entry.value);
+          break;
+        case kPutEntityRecord: {
+          // sst_file_writer.PutEntity(write_entry.key, write_entry.value);
+          WideColumns columns;
+          s =
+              WideColumnSerialization::Deserialize(write_entry.value, columns);
+          assert(s.ok());
+          s = sst_file_writer.PutEntity(write_entry.key, columns);
+        break;
+        }
+
+        case kLogDataRecord:
+        case kXIDRecord:
+        case kUnknownRecord:
+          fprintf(stdout, "Unknown record\n");
+          break;
+      }
+      assert(s.ok());
+      iter->Next();
+    }
+    assert(iter->status().ok());
+    if (!s.ok()) {
+      fprintf(stdout, "sst_file_writer_not_ok %s\n", s.ToString().c_str());
+      assert(false);
+    }
+
+    ExternalSstFileInfo file_info;
+    s = sst_file_writer.Finish(&file_info);
+    to_ingest_files_.emplace_back(file_info);
+    cf_handles_.emplace_back(cf_handle);
+    assert(s.ok());
+  }
+  return s;
+}
+
 Status WriteCommittedTxn::CommitWithoutPrepareInternal() {
   WriteBatchWithIndex* wbwi = GetWriteBatch();
   assert(wbwi);
@@ -838,11 +960,45 @@ Status WriteCommittedTxn::CommitInternal() {
   // We take the commit-time batch and append the Commit marker.
   // The Memtable will ignore the Commit marker in non-recovery mode
   WriteBatch* working_batch = GetCommitTimeWriteBatch();
-
   Status s;
+  fprintf(stdout, "Committed Txn %s\n", GetName().c_str());
+  std::vector<std::unique_ptr<ColumnFamilyHandle>> cf_handles_ptrs;
+  if (use_ingestion_) {
+    if (to_ingest_files_.empty()) {
+      if (GetWriteBatch()->HasDuplicateKeys()) {
+        fprintf(stdout, "Duplicated keys not supported, fall back to normal commit %s\n", GetName().c_str());
+      } else {
+        fprintf(stdout, "To ingest files\n");
+        EnvOptions env_options;
+        const std::unordered_set<uint32_t>& cf_ids = GetWriteBatch()->GetColumnFamilyIDs();
+        std::vector<ColumnFamilyHandle*> cf_handles;
+        std::vector<Options> cf_options;
+        std::vector<Options*> cf_options_ptrs;
+        for (uint32_t cf_id : cf_ids) {
+          cf_handles_ptrs.emplace_back(db_impl_->GetColumnFamilyHandleUnlocked(cf_id));
+          ColumnFamilyHandle* cf_handle = cf_handles_ptrs.back().get();
+          cf_handles.emplace_back(cf_handle);
+          fprintf(stdout, "cf_id %d cf_handle %p\n", (int)cf_id, static_cast<void*>(cf_handle));
+          cf_options.emplace_back(db_->GetOptions(cf_handle));
+        }
+        for (size_t i = 0; i < cf_ids.size(); i++) {
+          cf_options_ptrs.emplace_back(&cf_options[i]);
+        }
+        s = PersistForCommit(env_options, cf_options_ptrs, cf_handles);
+      }
+    }
+  }
+  if (!s.ok()) {
+    fprintf(stderr, "%s\n", s.ToString().c_str());
+    fflush(stderr);
+    return s;
+  }
+
+  const bool use_file_ingestion = !to_ingest_files_.empty();
   if (!needs_ts) {
     s = WriteBatchInternal::MarkCommit(working_batch, name_);
   } else {
+    assert(!use_file_ingestion);
     assert(commit_timestamp_ != kMaxTxnTimestamp);
     char commit_ts_buf[sizeof(kMaxTxnTimestamp)];
     EncodeFixed64(commit_ts_buf, commit_timestamp_);
@@ -878,11 +1034,17 @@ Status WriteCommittedTxn::CommitInternal() {
   // any operations appended to this working_batch will be ignored from WAL
   working_batch->MarkWalTerminationPoint();
 
-  // insert prepared batch into Memtable only skipping WAL.
-  // Memtable will ignore BeginPrepare/EndPrepare markers
-  // in non recovery mode and simply insert the values
-  s = WriteBatchInternal::Append(working_batch, wb);
-  assert(s.ok());
+  uint64_t reserve_seqno_count;
+  if (!use_file_ingestion) {
+    // insert prepared batch into Memtable only skipping WAL.
+    // Memtable will ignore BeginPrepare/EndPrepare markers
+    // in non recovery mode and simply insert the values
+    s = WriteBatchInternal::Append(working_batch, wb);
+    assert(s.ok());
+    reserve_seqno_count = 0;
+  } else {
+    reserve_seqno_count = wb->Count();
+  }
 
   uint64_t seq_used = kMaxSequenceNumber;
   SnapshotCreationCallback snapshot_creation_cb(db_impl_, commit_timestamp_,
@@ -893,15 +1055,33 @@ Status WriteCommittedTxn::CommitInternal() {
       s = Status::InvalidArgument("Must set transaction commit timestamp");
       return s;
     } else {
+      // TODO: what does this do?
       post_mem_cb = &snapshot_creation_cb;
     }
   }
+
   s = db_impl_->WriteImpl(write_options_, working_batch, /*callback*/ nullptr,
                           /*user_write_cb=*/nullptr,
                           /*log_used*/ nullptr, /*log_ref*/ log_number_,
                           /*disable_memtable*/ false, &seq_used,
                           /*batch_cnt=*/0, /*pre_release_callback=*/nullptr,
-                          post_mem_cb);
+                          post_mem_cb,
+                          /*reserve_seqno_count=*/reserve_seqno_count);
+  if (s.ok() && use_file_ingestion) {
+    IngestExternalFileOptions options;
+    options.move_files = true;
+    options.failed_move_fall_back_to_copy = false;
+    options.flush = true;
+    std::vector<IngestExternalFileArg> args(to_ingest_files_.size());
+    for (size_t i = 0; i < to_ingest_files_.size(); ++i) {
+      args[i].column_family = cf_handles_[i];
+      args[i].external_files.emplace_back(to_ingest_files_[i].file_path);
+      args[i].options = options;
+    }
+    s = db_impl_->IngestExternalFiles(args);
+    fprintf(stdout, "File Ingestion %s\n", s.ToString().c_str());
+  }
+  // TODO: what is seq used
   assert(!s.ok() || seq_used != kMaxSequenceNumber);
   if (s.ok()) {
     SetId(seq_used);
@@ -1059,9 +1239,9 @@ Status PessimisticTransaction::LockBatch(WriteBatch* batch,
 
 // Attempt to lock this key.
 // Returns OK if the key has been successfully locked.  Non-ok, otherwise.
-// If check_shapshot is true and this transaction has a snapshot set,
-// this key will only be locked if there have been no writes to this key since
-// the snapshot time.
+// If check_shapshot is true and this transaction has a snapshot set, // TODO:
+// check_snapshot is probably out_dated, do_validate? this key will only be
+// locked if there have been no writes to this key since the snapshot time.
 Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
                                        const Slice& key, bool read_only,
                                        bool exclusive, const bool do_validate,
@@ -1142,7 +1322,15 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
       // Failed to validate key
       // Unlock key we just locked
       if (lock_upgrade) {
-        s = txn_db_impl_->TryLock(this, cfh_id, key_str, false /* exclusive */);
+        s = txn_db_impl_->TryLock(
+            this, cfh_id, key_str,
+            false /* exclusive */);  // is this status overwriting correct? //
+                                     // Why do we need to downgrade the lock to
+                                     // shared?
+        // seems like a bug to overwrite status, what's the implication?
+        // a lock upgrade fails, but ok is returned. Only shared lock is held
+        // somehow. Is it possible that validate snapshot would fail if we need
+        // to upgrade lock here? we should already have acquired shared lock.
         assert(s.ok());
       } else if (!previously_locked) {
         txn_db_impl_->UnLock(this, cfh_id, key.ToString());

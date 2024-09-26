@@ -3504,6 +3504,72 @@ TEST_F(DBFlushTest, DBStuckAfterAtomicFlushError) {
   ASSERT_OK(dbfull()->TEST_WaitForBackgroundWork());
   ASSERT_EQ(1, NumTableFilesAtLevel(0));
 }
+
+TEST_F(DBAtomicFlushTest, TxnIngestionTest) {
+  Options options = CurrentOptions();
+  options.create_if_missing = true;
+  options.allow_2pc = true;
+  options.two_write_queues = true;
+  // Destroy the DB to recreate as a TransactionDB.
+  Close();
+  Destroy(options, true);
+
+  // Create a TransactionDB.
+  TransactionDB* txn_db = nullptr;
+  TransactionDBOptions txn_db_opts;
+  txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
+  ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+  ASSERT_NE(txn_db, nullptr);
+  db_ = txn_db;
+
+  // Create two more columns other than default CF.
+  std::vector<std::string> cfs = {"puppy", "kitty"};
+  CreateColumnFamilies(cfs, options);
+  ASSERT_EQ(handles_.size(), 2);
+  ASSERT_EQ(handles_[0]->GetName(), cfs[0]);
+  ASSERT_EQ(handles_[1]->GetName(), cfs[1]);
+
+  WriteOptions wopts;
+  TransactionOptions txn_opts;
+  // txn1 only prepare, but does not commit.
+  // The WAL containing the prepared but uncommitted data must be kept.
+  Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+  ASSERT_NE(txn1, nullptr);
+  ASSERT_OK(txn1->Put(handles_[0], "k1", "v1"));
+  ASSERT_OK(txn1->Put(handles_[0], "k0", "v1"));
+  ASSERT_OK(txn1->Put(handles_[1], "k0", "v2"));
+  ASSERT_OK(txn1->Delete(handles_[1], "l1"));
+  ASSERT_OK(txn1->Put(handles_[1], "k3", "v3"));
+
+  // A txn must be named before prepare.
+  ASSERT_OK(txn1->SetName("txn1"));
+  // Prepare writes to WAL, but not to memtable. (WriteCommitted)
+  ASSERT_OK(txn1->Prepare());
+  // std::vector<Options*> opts {&options, &options};
+  // ASSERT_OK(txn1->PersistForCommit(EnvOptions(), opts, handles_));
+  // Commit writes to memtable.
+  ASSERT_OK(txn1->Commit());
+  delete txn1;
+
+  std::unique_ptr<Iterator> iter{db_->NewIterator(ReadOptions(), handles_[0])};
+  iter->SeekToFirst();
+  while (iter->Valid()) {
+    std::cout << iter->key().ToString() << " -> " << iter->value().ToString() << std::endl;
+    iter->Next();
+  }
+  ASSERT_OK(iter->status());
+  iter.reset(db_->NewIterator(ReadOptions(), handles_[1]));
+  iter->SeekToFirst();
+  while (iter->Valid()) {
+    std::cout << iter->key().ToString() << " -> " << iter->value().ToString() << std::endl;
+    iter->Next();
+  }
+  iter.reset();
+  cfs.push_back(kDefaultColumnFamilyName);
+  ASSERT_OK(TryReopenWithColumnFamilies(cfs, options));
+  DBImpl* db_impl = static_cast<DBImpl*>(db_);
+  ASSERT_TRUE(db_impl->allow_2pc());
+}
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

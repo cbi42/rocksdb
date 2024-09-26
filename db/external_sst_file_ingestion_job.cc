@@ -341,6 +341,10 @@ Status ExternalSstFileIngestionJob::Prepare(
 
 Status ExternalSstFileIngestionJob::NeedsFlush(bool* flush_needed,
                                                SuperVersion* super_version) {
+  if (ingestion_options_.flush) {
+    *flush_needed = true;
+    return Status::OK();
+  }
   size_t n = files_to_ingest_.size();
   autovector<UserKeyRange> ranges;
   ranges.reserve(n);
@@ -373,15 +377,17 @@ Status ExternalSstFileIngestionJob::Run() {
 #ifndef NDEBUG
   // We should never run the job with a memtable that is overlapping
   // with the files we are ingesting
-  bool need_flush = false;
-  status = NeedsFlush(&need_flush, super_version);
-  if (!status.ok()) {
-    return status;
+  if (!ingestion_options_.flush) {
+    bool need_flush = false;
+    status = NeedsFlush(&need_flush, super_version);
+    if (!status.ok()) {
+      return status;
+    }
+    if (need_flush) {
+      return Status::TryAgain("need_flush");
+    }
+    assert(status.ok() && need_flush == false);
   }
-  if (need_flush) {
-    return Status::TryAgain("need_flush");
-  }
-  assert(status.ok() && need_flush == false);
 #endif
 
   bool force_global_seqno = false;
@@ -406,6 +412,7 @@ Status ExternalSstFileIngestionJob::Run() {
           super_version, force_global_seqno, cfd_->ioptions()->compaction_style,
           last_seqno, &f, &assigned_seqno);
     }
+    fprintf(stdout, "Assigned seqno %d\n", (int)assigned_seqno);
 
     // Modify the smallest/largest internal key to include the sequence number
     // that we just learned. Only overwrite sequence number zero. There could

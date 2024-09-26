@@ -429,6 +429,7 @@ class MemTable {
   // If the earliest sequence number could not be determined,
   // kMaxSequenceNumber will be returned.
   SequenceNumber GetEarliestSequenceNumber() {
+    // With file ingestion and empty memtable, this seqno needs to be fixed.
     return earliest_seqno_.load(std::memory_order_relaxed);
   }
 

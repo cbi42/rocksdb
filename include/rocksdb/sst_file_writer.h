@@ -158,6 +158,8 @@ class SstFileWriter {
   // minimum timestamp is accepted, and it will not be persisted.
   Status Delete(const Slice& user_key, const Slice& timestamp);
 
+  Status SingleDelete(const Slice& user_key);
+
   // Add a range deletion tombstone to currently opened file. Such a range
   // deletion tombstone does NOT delete point (Put/Merge/Delete) keys in the
   // same file.
@@ -185,6 +187,7 @@ class SstFileWriter {
   // minimum timestamp is accepted, and it will not be persisted.
   Status DeleteRange(const Slice& begin_key, const Slice& end_key,
                      const Slice& timestamp);
+
 
   // Finalize writing to sst file and close file.
   //

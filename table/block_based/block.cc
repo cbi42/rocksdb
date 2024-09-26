@@ -704,7 +704,8 @@ bool DataBlockIter::ParseNextDataKey(bool* is_shared) {
              value_type == ValueType::kTypeDeletion ||
              value_type == ValueType::kTypeDeletionWithTimestamp ||
              value_type == ValueType::kTypeRangeDeletion ||
-             value_type == ValueType::kTypeWideColumnEntity);
+             value_type == ValueType::kTypeWideColumnEntity ||
+             value_type == ValueType::kTypeSingleDeletion);
       assert(seqno == 0);
     }
 #endif  // NDEBUG

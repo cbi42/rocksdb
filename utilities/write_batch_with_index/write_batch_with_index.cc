@@ -48,6 +48,8 @@ struct WriteBatchWithIndex::Rep {
   size_t last_sub_batch_offset;
   // Total number of sub-batches in the write batch. Default is 1.
   size_t sub_batch_cnt;
+  std::unordered_set<uint32_t> cf_ids;
+  bool has_duplicated_keys = false;
 
   // Remember current offset of internal write batch, which is used as
   // the starting offset of the next record.
@@ -88,6 +90,7 @@ bool WriteBatchWithIndex::Rep::UpdateExistingEntry(
 
 bool WriteBatchWithIndex::Rep::UpdateExistingEntryWithCfId(
     uint32_t column_family_id, const Slice& key, WriteType type) {
+  // TODO: file ingestion should assert overwrite key
   if (!overwrite_key) {
     return false;
   }
@@ -100,6 +103,7 @@ bool WriteBatchWithIndex::Rep::UpdateExistingEntryWithCfId(
   } else if (!iter.MatchesKey(column_family_id, key)) {
     return false;
   } else {
+    has_duplicated_keys = true;
     // Move to the end of this key (NextKey-Prev)
     iter.NextKey();  // Move to the next key
     if (iter.Valid()) {
@@ -166,6 +170,7 @@ void WriteBatchWithIndex::Rep::AddNewEntry(uint32_t column_family_id) {
       new (mem) WriteBatchIndexEntry(last_entry_offset, column_family_id,
                                      key.data() - wb_data.data(), key.size());
   skip_list.Insert(index_entry);
+  cf_ids.insert(column_family_id);
 }
 
 void WriteBatchWithIndex::Rep::Clear() {
@@ -181,6 +186,8 @@ void WriteBatchWithIndex::Rep::ClearIndex() {
   last_entry_offset = 0;
   last_sub_batch_offset = 0;
   sub_batch_cnt = 1;
+  cf_ids.clear();
+  has_duplicated_keys = false;
 }
 
 Status WriteBatchWithIndex::Rep::ReBuildIndex() {
@@ -310,6 +317,11 @@ WBWIIterator* WriteBatchWithIndex::NewIterator(
     ColumnFamilyHandle* column_family) {
   return new WBWIIteratorImpl(GetColumnFamilyID(column_family),
                               &(rep->skip_list), &rep->write_batch,
+                              &(rep->comparator));
+}
+
+WBWIIterator* WriteBatchWithIndex::NewIterator(uint32_t cf_id) const {
+  return new WBWIIteratorImpl(cf_id, &(rep->skip_list), &rep->write_batch,
                               &(rep->comparator));
 }
 
@@ -1130,5 +1142,15 @@ const Comparator* WriteBatchWithIndexInternal::GetUserComparator(
   const WriteBatchEntryComparator& ucmps = wbwi.rep->comparator;
   return ucmps.GetComparator(cf_id);
 }
+
+const std::unordered_set<uint32_t>& WriteBatchWithIndex::GetColumnFamilyIDs()
+    const {
+  return rep->cf_ids;
+}
+
+bool WriteBatchWithIndex::HasDuplicateKeys() const {
+  return rep->has_duplicated_keys;
+}
+
 
 }  // namespace ROCKSDB_NAMESPACE

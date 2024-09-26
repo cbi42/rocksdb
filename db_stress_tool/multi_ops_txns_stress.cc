@@ -545,6 +545,12 @@ Status MultiOpsTxnsStressTest::TestCustomOperations(
     assert(false);
   }
 
+  if (!s.ok()) {
+    fprintf(stderr, "Transaction failed %s\n", s.ToString().c_str());
+    fflush(stderr);
+    thread->shared->SafeTerminate();
+  }
+  assert(s.ok());
   return s;
 }
 
@@ -676,6 +682,14 @@ Status MultiOpsTxnsStressTest::PrimaryKeyUpdateTxn(ThreadState* thread,
 
   if (FLAGS_rollback_one_in > 0 && thread->rand.OneIn(FLAGS_rollback_one_in)) {
     s = Status::Incomplete();
+    return s;
+  }
+  EnvOptions env_options;
+  std::vector<Options*> options;
+  options.push_back(&options_);
+  std::vector<ColumnFamilyHandle*> cfs{cf};
+  s = txn->PersistForCommit(env_options, options, cfs);
+  if (!s.ok()) {
     return s;
   }
 
@@ -875,6 +889,15 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
     return s;
   }
 
+  EnvOptions env_options;
+  std::vector<Options*> options;
+  options.push_back(&options_);
+  std::vector<ColumnFamilyHandle*> cfs{db_->DefaultColumnFamily()};
+  s = txn->PersistForCommit(env_options, options, cfs);
+  if (!s.ok()) {
+    return s;
+  }
+
   if (FLAGS_rollback_one_in > 0 && thread->rand.OneIn(FLAGS_rollback_one_in)) {
     s = Status::Incomplete();
     return s;
@@ -955,6 +978,14 @@ Status MultiOpsTxnsStressTest::UpdatePrimaryIndexValueTxn(ThreadState* thread,
     return s;
   }
   s = txn->Prepare();
+  if (!s.ok()) {
+    return s;
+  }
+  EnvOptions env_options;
+  std::vector<Options*> options;
+  options.push_back(&options_);
+  std::vector<ColumnFamilyHandle*> cfs{cf};
+  s = txn->PersistForCommit(env_options, options, cfs);
   if (!s.ok()) {
     return s;
   }

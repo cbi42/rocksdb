@@ -10,6 +10,8 @@
 // inserted.
 #pragma once
 
+#include <gflags/gflags_declare.h>
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -193,6 +195,7 @@ class WriteBatchWithIndex : public WriteBatchBase {
   //
   // The returned iterator should be deleted by the caller.
   WBWIIterator* NewIterator(ColumnFamilyHandle* column_family);
+  WBWIIterator* NewIterator(uint32_t cf_id) const;
   // Create an iterator of the default column family.
   WBWIIterator* NewIterator();
 
@@ -325,6 +328,7 @@ class WriteBatchWithIndex : public WriteBatchBase {
 
   // Records the state of the batch for future calls to RollbackToSavePoint().
   // May be called multiple times to set multiple save points.
+  // TODO: how does CF work with save point?
   void SetSavePoint() override;
 
   // Remove all entries in this batch (Put, PutEntity, Merge, Delete,
@@ -347,6 +351,10 @@ class WriteBatchWithIndex : public WriteBatchBase {
 
   void SetMaxBytes(size_t max_bytes) override;
   size_t GetDataSize() const;
+
+  const std::unordered_set<uint32_t>& GetColumnFamilyIDs() const;
+
+  bool HasDuplicateKeys() const;
 
  private:
   friend class PessimisticTransactionDB;

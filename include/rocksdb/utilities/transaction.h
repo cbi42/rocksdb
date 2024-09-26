@@ -236,6 +236,16 @@ class Transaction {
   // transaction before Commit.
   virtual Status Commit() = 0;
 
+  // Env options
+  // Options
+  // CF Handles
+  // file path will be handled internally
+  virtual Status PersistForCommit(
+      const EnvOptions&, const std::vector<Options*>&,
+      const std::vector<ColumnFamilyHandle*>&) {
+    return Status::NotSupported("PrepareFilesForCommit() not supported");
+  }
+
   // In addition to Commit(), also creates a snapshot of the db after all
   // writes by this txn are visible to other readers.
   // Caller is responsible for ensuring that
@@ -722,7 +732,8 @@ class Transaction {
 
  protected:
   explicit Transaction(const TransactionDB* /*db*/) {}
-  Transaction() : log_number_(0), txn_state_(STARTED) {}
+  Transaction()
+      : log_number_(0), txn_state_(STARTED), use_file_ingestion_(false) {}
 
   // the log in which the prepared section for this txn resides
   // (for two phase commit)
@@ -731,6 +742,8 @@ class Transaction {
 
   // Execution status of the transaction.
   std::atomic<TransactionState> txn_state_;
+
+  bool use_file_ingestion_;
 
   uint64_t id_ = 0;
   virtual void SetId(uint64_t id) {

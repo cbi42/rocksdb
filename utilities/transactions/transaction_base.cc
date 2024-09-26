@@ -65,6 +65,7 @@ TransactionBaseImpl::TransactionBaseImpl(
       cmp_(GetColumnFamilyUserComparator(db->DefaultColumnFamily())),
       lock_tracker_factory_(lock_tracker_factory),
       start_time_(dbimpl_->GetSystemClock()->NowMicros()),
+  // TODO: overwrite keys can be incorrect with singledelete?
       write_batch_(cmp_, 0, true, 0, write_options.protection_bytes_per_key),
       tracked_locks_(lock_tracker_factory_.Create()),
       commit_time_batch_(0 /* reserved_bytes */, 0 /* max_bytes */,

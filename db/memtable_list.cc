@@ -370,6 +370,19 @@ bool MemTableListVersion::TrimHistory(autovector<MemTable*>* to_delete,
   return ret;
 }
 
+  bool MemTableListVersion::TrimAllHistory() {
+  while (memlist_history_.size() > 0) {
+    MemTable* x = memlist_history_.back();
+    memlist_history_.pop_back();
+    if (x->Unref()) {
+      assert(*parent_memtable_list_memory_usage_ >= x->ApproximateMemoryUsage());
+      *parent_memtable_list_memory_usage_ -= x->ApproximateMemoryUsage();
+      delete x;
+    }
+  }
+  return true;
+}
+
 // Returns true if there is at least one memtable on which flush has
 // not yet started.
 bool MemTableList::IsFlushPending() const {

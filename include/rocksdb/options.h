@@ -2224,6 +2224,8 @@ struct IngestExternalFileOptions {
   // RepairDB() may not recover these files correctly, potentially leading to
   // data loss.
   bool allow_db_generated_files = false;
+
+  bool flush = false;
 };
 
 enum TraceFilterType : uint64_t {

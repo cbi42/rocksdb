@@ -1522,7 +1522,8 @@ class DBImpl : public DB {
                    bool disable_memtable = false, uint64_t* seq_used = nullptr,
                    size_t batch_cnt = 0,
                    PreReleaseCallback* pre_release_callback = nullptr,
-                   PostMemTableCallback* post_memtable_callback = nullptr);
+                   PostMemTableCallback* post_memtable_callback = nullptr,
+                   uint64_t reserve_seqno_count = 0);
 
   Status PipelinedWriteImpl(const WriteOptions& options, WriteBatch* updates,
                             WriteCallback* callback = nullptr,

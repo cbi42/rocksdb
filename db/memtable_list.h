@@ -162,6 +162,8 @@ class MemTableListVersion {
   // Return true if memtable is trimmed
   bool TrimHistory(autovector<MemTable*>* to_delete, size_t usage);
 
+  bool TrimAllHistory();
+
   bool GetFromList(std::list<MemTable*>* list, const LookupKey& key,
                    std::string* value, PinnableWideColumns* columns,
                    std::string* timestamp, Status* s,

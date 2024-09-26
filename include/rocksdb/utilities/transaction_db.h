@@ -339,6 +339,8 @@ struct TransactionOptions {
   // size in APIs that MyRocks currently are using, including Put, Merge, Delete
   // DeleteRange, SingleDelete.
   bool write_batch_track_timestamp_size = false;
+
+  bool use_file_ingestion = true;
 };
 
 // The per-write optimizations that do not involve transactions. TransactionDB
