@@ -313,7 +313,7 @@ class TransactionBaseImpl : public Transaction {
   Status GetEntityImpl(const ReadOptions& options,
                        ColumnFamilyHandle* column_family, const Slice& key,
                        PinnableWideColumns* columns) {
-    return write_batch_.GetEntityFromBatchAndDB(db_, options, column_family,
+    return write_batch_->GetEntityFromBatchAndDB(db_, options, column_family,
                                                 key, columns);
   }
 
@@ -321,7 +321,7 @@ class TransactionBaseImpl : public Transaction {
                           ColumnFamilyHandle* column_family, size_t num_keys,
                           const Slice* keys, PinnableWideColumns* results,
                           Status* statuses, bool sorted_input) {
-    write_batch_.MultiGetEntityFromBatchAndDB(db_, options, column_family,
+    write_batch_->MultiGetEntityFromBatchAndDB(db_, options, column_family,
                                               num_keys, keys, results, statuses,
                                               sorted_input);
   }
@@ -347,10 +347,10 @@ class TransactionBaseImpl : public Transaction {
   // Initialize write_batch_ for 2PC by inserting Noop.
   inline void InitWriteBatch(bool clear = false) {
     if (clear) {
-      write_batch_.Clear();
+      write_batch_->Clear();
     }
-    assert(write_batch_.GetDataSize() == WriteBatchInternal::kHeader);
-    auto s = WriteBatchInternal::InsertNoop(write_batch_.GetWriteBatch());
+    assert(write_batch_->GetDataSize() == WriteBatchInternal::kHeader);
+    auto s = WriteBatchInternal::InsertNoop(write_batch_->GetWriteBatch());
     assert(s.ok());
   }
 
@@ -409,7 +409,7 @@ class TransactionBaseImpl : public Transaction {
   };
 
   // Records writes pending in this transaction
-  WriteBatchWithIndex write_batch_;
+  std::shared_ptr<WriteBatchWithIndex> write_batch_;
 
   // For Pessimistic Transactions this is the set of acquired locks.
   // Optimistic Transactions will keep note the requested locks (not actually

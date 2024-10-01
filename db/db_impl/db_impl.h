@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <rocksdb/utilities/write_batch_with_index.h>
 
 #include "db/column_family.h"
 #include "db/compaction/compaction_iterator.h"
@@ -559,6 +560,98 @@ class DBImpl : public DB {
   using DB::IngestExternalFiles;
   Status IngestExternalFiles(
       const std::vector<IngestExternalFileArg>& args) override;
+
+  Status IngestWBWI(std::vector<ColumnFamilyHandle*> column_family_handles,
+    std::shared_ptr<WriteBatchWithIndex> wbwi,
+    uint64_t min_prep_log
+    // std::vector<Flushable*> flushables
+    ) {
+    InstrumentedMutexLock lock(&mutex_);
+    std::vector<Flushable*> f;
+    for (size_t i = 0; i < column_family_handles.size(); i++) {
+      ColumnFamilyHandle* cfh = column_family_handles[i];
+      ColumnFamilyData* cfd = versions_->GetColumnFamilySet()->GetColumnFamily(cfh->GetID());
+      FlushableWriteBatchWithIndex* new_flushable = new FlushableWriteBatchWithIndex(wbwi, cfh->GetComparator(),
+        cfh->GetID(), cfd->ioptions(), cfd->GetLatestMutableCFOptions());
+      if (min_prep_log > 0) {
+        new_flushable->SetMinPrepLog(min_prep_log);
+      }
+      new_flushable->Ref();
+      f.push_back(new_flushable);
+    }
+    // Enter write queue
+    // Stop writes to the DB by entering both write threads
+    WriteThread::Writer w;
+    write_thread_.EnterUnbatched(&w, &mutex_);
+    WriteThread::Writer nonmem_w;
+    if (two_write_queues_) {
+      nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
+    }
+    WaitForPendingWrites();
+
+    Status s;
+    fprintf(stdout, "IngestFlushable(): ");
+    for (size_t i = 0; i < f.size() && s.ok(); ++i) {
+      ColumnFamilyHandle* cf = column_family_handles[i];
+    // for (auto cf : column_family_handles) {
+      WriteContext write_context;
+      const SequenceNumber last_seqno = versions_->LastSequence();
+      SequenceNumber consumed_seqno_count = 1;
+      if (!f[i]->SetGlobalSequenceNumber(last_seqno + consumed_seqno_count)) {
+        s = Status::NotSupported("Cannot set global seqno");
+        break;
+      }
+      versions_->SetLastAllocatedSequence(last_seqno + consumed_seqno_count);
+      versions_->SetLastPublishedSequence(last_seqno + consumed_seqno_count);
+      versions_->SetLastSequence(last_seqno + consumed_seqno_count);
+      // Get memtable option here
+
+      s = SwitchMemtable(versions_->GetColumnFamilySet()->GetColumnFamily(cf->GetID()),
+        &write_context, f[i]);
+      // SwitchMemtable
+      // Since there's no write, we can ingest a new imm
+      // Add a new imm Memtable
+      fprintf(stdout, "Cf: %s ", cf->GetName().c_str());
+    }
+    fprintf(stdout, "%d flushables\n", (int) f.size());
+    // Resume writes to the DB
+    if (two_write_queues_) {
+      nonmem_write_thread_.ExitUnbatched(&nonmem_w);
+    }
+    write_thread_.ExitUnbatched(&w);
+
+    if (s.ok()) {
+      autovector<ColumnFamilyData*> cfds;
+      if (immutable_db_options_.atomic_flush) {
+        SelectColumnFamiliesForAtomicFlush(&cfds);
+      } else {
+        for (size_t i = 0; i < column_family_handles.size(); i++) {
+          ColumnFamilyHandle* cfh = column_family_handles[i];
+          ColumnFamilyData* cfd = versions_->GetColumnFamilySet()->GetColumnFamily(cfh->GetID());
+          cfds.push_back(cfd);
+        }
+      }
+      if (immutable_db_options_.atomic_flush) {
+        AssignAtomicFlushSeq(cfds);
+      }
+      for (const auto cfd : cfds) {
+        cfd->imm()->FlushRequested();
+        if (!immutable_db_options_.atomic_flush) {
+          FlushRequest flush_req;
+          GenerateFlushRequest({cfd}, FlushReason::kExternalFileIngestion,
+                               &flush_req);
+          EnqueuePendingFlush(flush_req);
+        }
+      }
+      if (immutable_db_options_.atomic_flush) {
+        FlushRequest flush_req;
+        GenerateFlushRequest(cfds, FlushReason::kExternalFileIngestion, &flush_req);
+        EnqueuePendingFlush(flush_req);
+      }
+      MaybeScheduleFlushOrCompaction();
+    }
+    return s;
+  };
 
   using DB::CreateColumnFamilyWithImport;
   Status CreateColumnFamilyWithImport(
@@ -2029,7 +2122,7 @@ class DBImpl : public DB {
 
   Status TrimMemtableHistory(WriteContext* context);
 
-  Status SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context);
+  Status SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context, Flushable* new_imm = nullptr);
 
   // Select and output column families qualified for atomic flush in
   // `selected_cfds`. If `provided_candidate_cfds` is non-empty, it will be used

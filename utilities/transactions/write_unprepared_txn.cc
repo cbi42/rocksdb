@@ -250,8 +250,8 @@ Status WriteUnpreparedTxn::MaybeFlushWriteBatchToDB() {
   const bool kPrepared = true;
   Status s;
   if (write_batch_flush_threshold_ > 0 &&
-      write_batch_.GetWriteBatch()->Count() > 0 &&
-      write_batch_.GetDataSize() >
+      write_batch_->GetWriteBatch()->Count() > 0 &&
+      write_batch_->GetDataSize() >
           static_cast<size_t>(write_batch_flush_threshold_)) {
     assert(GetState() != PREPARED);
     s = FlushWriteBatchToDB(!kPrepared);
@@ -462,7 +462,7 @@ Status WriteUnpreparedTxn::FlushWriteBatchWithSavePointToDB() {
   };
 
   // The comparator of the default cf is passed in, similar to the
-  // initialization of TransactionBaseImpl::write_batch_. This comparator is
+  // initialization of TransactionBaseImpl::write_batch_-> This comparator is
   // only used if the write batch encounters an invalid cf id, and falls back to
   // this comparator.
   WriteBatchWithIndex wb(wpt_db_->DefaultColumnFamily()->GetComparator(), 0,
@@ -470,14 +470,14 @@ Status WriteUnpreparedTxn::FlushWriteBatchWithSavePointToDB() {
   // Swap with write_batch_ so that wb contains the complete write batch. The
   // actual write batch that will be flushed to DB will be built in
   // write_batch_, and will be read by FlushWriteBatchToDBInternal.
-  std::swap(wb, write_batch_);
+  std::swap(wb, *write_batch_);
   TransactionBaseImpl::InitWriteBatch();
 
   size_t prev_boundary = WriteBatchInternal::kHeader;
   const bool kPrepared = true;
   for (size_t i = 0; i < unflushed_save_points_->size() + 1; i++) {
     bool trailing_batch = i == unflushed_save_points_->size();
-    SavePointBatchHandler sp_handler(&write_batch_,
+    SavePointBatchHandler sp_handler(write_batch_.get(),
                                      *wupt_db_->GetCFHandleMap().get());
     size_t curr_boundary = trailing_batch ? wb.GetWriteBatch()->GetDataSize()
                                           : (*unflushed_save_points_)[i];
@@ -494,7 +494,7 @@ Status WriteUnpreparedTxn::FlushWriteBatchWithSavePointToDB() {
       return s;
     }
 
-    if (write_batch_.GetWriteBatch()->Count() > 0) {
+    if (write_batch_->GetWriteBatch()->Count() > 0) {
       // Flush the write batch.
       s = FlushWriteBatchToDBInternal(!kPrepared);
       if (!s.ok()) {
@@ -853,7 +853,7 @@ void WriteUnpreparedTxn::SetSavePoint() {
   if (unflushed_save_points_ == nullptr) {
     unflushed_save_points_.reset(new autovector<size_t>());
   }
-  unflushed_save_points_->push_back(write_batch_.GetDataSize());
+  unflushed_save_points_->push_back(write_batch_->GetDataSize());
 }
 
 Status WriteUnpreparedTxn::RollbackToSavePoint() {
@@ -896,7 +896,7 @@ Status WriteUnpreparedTxn::RollbackToSavePointInternal() {
   WriteUnpreparedTxnReadCallback callback(wupt_db_, snap_seq, min_uncommitted,
                                           top.unprep_seqs_,
                                           kBackedByDBSnapshot);
-  s = WriteRollbackKeys(tracked_keys, &write_batch_, &callback, roptions);
+  s = WriteRollbackKeys(tracked_keys, write_batch_.get(), &callback, roptions);
   if (!s.ok()) {
     return s;
   }
@@ -908,10 +908,10 @@ Status WriteUnpreparedTxn::RollbackToSavePointInternal() {
   }
 
   // PessimisticTransaction::RollbackToSavePoint will call also call
-  // RollbackToSavepoint on write_batch_. However, write_batch_ is empty and has
+  // RollbackToSavepoint on write_batch_-> However, write_batch_ is empty and has
   // no savepoints because this savepoint has already been flushed. Work around
   // this by setting a fake savepoint.
-  write_batch_.SetSavePoint();
+  write_batch_->SetSavePoint();
   s = PessimisticTransaction::RollbackToSavePoint();
   assert(s.ok());
   if (!s.ok()) {
@@ -935,10 +935,10 @@ Status WriteUnpreparedTxn::PopSavePoint() {
 
   if (flushed_save_points_ != nullptr && !flushed_save_points_->empty()) {
     // PessimisticTransaction::PopSavePoint will call also call PopSavePoint on
-    // write_batch_. However, write_batch_ is empty and has no savepoints
+    // write_batch_-> However, write_batch_ is empty and has no savepoints
     // because this savepoint has already been flushed. Work around this by
     // setting a fake savepoint.
-    write_batch_.SetSavePoint();
+    write_batch_->SetSavePoint();
     Status s = PessimisticTransaction::PopSavePoint();
     assert(!s.IsNotFound());
     flushed_save_points_->pop_back();
@@ -975,7 +975,7 @@ void WriteUnpreparedTxn::MultiGet(const ReadOptions& _read_options,
       read_options.snapshot, &min_uncommitted, &snap_seq);
   WriteUnpreparedTxnReadCallback callback(wupt_db_, snap_seq, min_uncommitted,
                                           unprep_seqs_, backed_by_snapshot);
-  write_batch_.MultiGetFromBatchAndDB(db_, read_options, column_family,
+  write_batch_->MultiGetFromBatchAndDB(db_, read_options, column_family,
                                       num_keys, keys, values, statuses,
                                       sorted_input, &callback);
   if (UNLIKELY(!callback.valid() ||
@@ -1012,7 +1012,7 @@ Status WriteUnpreparedTxn::GetImpl(const ReadOptions& options,
       wupt_db_->AssignMinMaxSeqs(options.snapshot, &min_uncommitted, &snap_seq);
   WriteUnpreparedTxnReadCallback callback(wupt_db_, snap_seq, min_uncommitted,
                                           unprep_seqs_, backed_by_snapshot);
-  auto res = write_batch_.GetFromBatchAndDB(db_, options, column_family, key,
+  auto res = write_batch_->GetFromBatchAndDB(db_, options, column_family, key,
                                             value, &callback);
   if (LIKELY(callback.valid() &&
              wupt_db_->ValidateSnapshot(snap_seq, backed_by_snapshot))) {
@@ -1043,7 +1043,7 @@ Iterator* WriteUnpreparedTxn::GetIterator(const ReadOptions& options,
   assert(db_iter);
 
   auto iter =
-      write_batch_.NewIteratorWithBase(column_family, db_iter, &options);
+      write_batch_->NewIteratorWithBase(column_family, db_iter, &options);
   active_iterators_.push_back(iter);
   iter->RegisterCleanup(CleanupWriteUnpreparedWBWIIterator, this, iter);
   return iter;

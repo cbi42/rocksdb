@@ -346,7 +346,9 @@ class WriteCommittedTxn : public PessimisticTransaction {
   // even if it enables timestamp.
   std::unordered_set<uint32_t> cfs_with_ts_tracked_when_indexing_disabled_;
 
+  bool ingest_batch_ = true;
   std::vector<ExternalSstFileInfo> to_ingest_files_;
+  std::vector<Flushable*> to_ingest_batch_;
   std::vector<ColumnFamilyHandle*> cf_handles_;
 };
 

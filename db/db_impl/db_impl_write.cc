@@ -2198,7 +2198,7 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 // REQUIRES: this thread is currently at the front of the writer queue
 // REQUIRES: this thread is currently at the front of the 2nd writer queue if
 // two_write_queues_ is true (This is to simplify the reasoning.)
-Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
+Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context, Flushable* new_imm) {
   mutex_.AssertHeld();
   assert(lock_wal_count_ == 0);
 
@@ -2407,6 +2407,11 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   assert(new_mem != nullptr);
   // Here we need to do something similar to add a new memtable to cfd->imm()
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
+  if (new_imm != nullptr) {
+    cfd->AssignFlushableID(new_imm);
+    new_imm->SetNextLogNumber(logfile_number_);
+    cfd->imm()->Add(new_imm, &context->memtables_to_free_);
+  }
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
