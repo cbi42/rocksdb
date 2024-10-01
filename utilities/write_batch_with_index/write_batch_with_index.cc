@@ -48,7 +48,7 @@ struct WriteBatchWithIndex::Rep {
   size_t last_sub_batch_offset;
   // Total number of sub-batches in the write batch. Default is 1.
   size_t sub_batch_cnt;
-  std::unordered_set<uint32_t> cf_ids;
+  std::unordered_map<uint32_t, uint32_t> cf_id_to_count;
   bool has_duplicated_keys = false;
 
   // Remember current offset of internal write batch, which is used as
@@ -170,7 +170,7 @@ void WriteBatchWithIndex::Rep::AddNewEntry(uint32_t column_family_id) {
       new (mem) WriteBatchIndexEntry(last_entry_offset, column_family_id,
                                      key.data() - wb_data.data(), key.size());
   skip_list.Insert(index_entry);
-  cf_ids.insert(column_family_id);
+  cf_id_to_count[column_family_id]++;
 }
 
 void WriteBatchWithIndex::Rep::Clear() {
@@ -186,7 +186,7 @@ void WriteBatchWithIndex::Rep::ClearIndex() {
   last_entry_offset = 0;
   last_sub_batch_offset = 0;
   sub_batch_cnt = 1;
-  cf_ids.clear();
+  cf_id_to_count.clear();
   has_duplicated_keys = false;
 }
 
@@ -1143,14 +1143,104 @@ const Comparator* WriteBatchWithIndexInternal::GetUserComparator(
   return ucmps.GetComparator(cf_id);
 }
 
-const std::unordered_set<uint32_t>& WriteBatchWithIndex::GetColumnFamilyIDs()
+const std::unordered_map<uint32_t, uint32_t>& WriteBatchWithIndex::GetColumnFamilyIDs()
     const {
-  return rep->cf_ids;
+  return rep->cf_id_to_count;
 }
 
 bool WriteBatchWithIndex::HasDuplicateKeys() const {
   return rep->has_duplicated_keys;
 }
 
+size_t FlushableWriteBatchWithIndex::ApproximateMemoryUsage() {
+  return 0;
+}
 
+  bool FlushableWriteBatchWithIndex::Get(const LookupKey& key, std::string* value,
+                   PinnableWideColumns* columns, std::string* /*timestamp*/,
+                   Status* s, MergeContext* merge_context,
+                   SequenceNumber* /*max_covering_tombstone_seq*/,
+                   SequenceNumber* out_seq, const ReadOptions& read_opts,
+                   bool /*immutable_memtable*/, ReadCallback* callback,
+                   bool* /*is_blob_index*/, bool do_merge) {
+  // TODO: what about read options snapshot?
+  // Given key
+  bool found_final_result = false;
+  std::unique_ptr<InternalIterator> iter{NewIterator(read_opts, nullptr, nullptr)};
+  iter->Seek(key.internal_key());
+  // Only need to look at the one key, we assume no duplicate keys.
+  // Also assume no range del
+  // Assume only Put, DEL, SINGLEDEL
+  if (iter->Valid()) {
+    if (comparator_->EqualWithoutTimestamp(ExtractUserKey(iter->key()), key.user_key())) {
+      uint64_t tag = ExtractInternalKeyFooter(iter->key());
+      ValueType type;
+      SequenceNumber seq;
+      UnPackSequenceAndType(tag, &seq, &type);
+      if (!callback || callback->IsVisible(seq)) {
+        *out_seq = seq;
+        // TODO: set return seqno
+        switch (type) {
+          case kTypeValue: {
+            found_final_result = true;
+
+            if (!do_merge) {
+              merge_context->PushOperand(iter->value(), /*operand_pinned=*/iter->IsValuePinned());
+            } else if (s->IsMergeInProgress()) {
+              *s = MergeHelper::TimedFullMerge(
+                moptions_.merge_operator, key.user_key(),
+                MergeHelper::kPlainBaseValue, iter->value(), merge_context->GetOperands(),
+                moptions_.info_log, moptions_.statistics, clock_,
+                /* update_num_ops_stats */ true, /* op_failure_scope */ nullptr,
+                value, columns);
+            } else if (value) {
+              value->assign(iter->value().data(), iter->value().size());
+            } else if (columns) {
+              columns->SetPlainValue(iter->value());
+            }
+            *s = Status::OK();
+            return found_final_result;
+          }
+          case kTypeDeletion:
+          case kTypeSingleDeletion: {
+            if (s->IsMergeInProgress()) {
+              if (value || columns) {
+                // `op_failure_scope` (an output parameter) is not provided (set to
+                // nullptr) since a failure must be propagated regardless of its
+                // value.
+                *s = MergeHelper::TimedFullMerge(
+               moptions_.merge_operator, key.user_key(),
+               MergeHelper::kPlainBaseValue, iter->value(), merge_context->GetOperands(),
+               moptions_.info_log, moptions_.statistics, clock_,
+               /* update_num_ops_stats */ true, /* op_failure_scope */ nullptr,
+               value, columns);
+              } else {
+                // We have found a final value (a base deletion) and have newer
+                // merge operands that we do not intend to merge. Nothing remains
+                // to be done so assign status to OK.
+                *s = Status::OK();
+              }
+            } else {
+              *s = Status::NotFound();
+            }
+            found_final_result = true;
+            return found_final_result;
+          }
+          default: {
+            std::string msg("Corrupted value not expected.");
+            msg.append("Unrecognized value type: " +
+                       std::to_string(static_cast<int>(type)) + ". ");
+            msg.append("User key: " + ExtractUserKey(iter->key()).ToString(/*hex=*/true) +
+                       ". ");
+            msg.append("seq: " + std::to_string(seq) + ".");
+            found_final_result = true;
+            *s = Status::Corruption(msg.c_str());
+            return found_final_result;
+          }
+        }
+      }
+    }
+  }
+  return found_final_result;
+}
 }  // namespace ROCKSDB_NAMESPACE

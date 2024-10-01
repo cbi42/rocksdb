@@ -73,8 +73,8 @@ void PessimisticTransaction::Initialize(const TransactionOptions& txn_options) {
 
   deadlock_detect_ = txn_options.deadlock_detect;
   deadlock_detect_depth_ = txn_options.deadlock_detect_depth;
-  write_batch_.SetMaxBytes(txn_options.max_write_batch_size);
-  write_batch_.GetWriteBatch()->SetTrackTimestampSize(
+  write_batch_->SetMaxBytes(txn_options.max_write_batch_size);
+  write_batch_->GetWriteBatch()->SetTrackTimestampSize(
       txn_options.write_batch_track_timestamp_size);
   skip_concurrency_control_ = txn_options.skip_concurrency_control;
 
@@ -770,14 +770,14 @@ Status WriteCommittedTxn::PersistForCommit(
   // }
   // loop over write batch
   // TODO: assert prepared not commited states
-  const std::unordered_set<uint32_t>& cf_ids =
+  const std::unordered_map<uint32_t, uint32_t>& cf_ids =
       GetWriteBatch()->GetColumnFamilyIDs();
   // TODO: validate that input cfs are enough for cf_ids
   Status s;
   for (auto cf_id : cf_ids) {
     size_t i = 0;
     for (; i < column_family.size(); ++i) {
-      if (column_family[i]->GetID() == cf_id) {
+      if (column_family[i]->GetID() == cf_id.first) {
         break;
       }
     }
@@ -968,23 +968,37 @@ Status WriteCommittedTxn::CommitInternal() {
       if (GetWriteBatch()->HasDuplicateKeys()) {
         fprintf(stdout, "Duplicated keys not supported, fall back to normal commit %s\n", GetName().c_str());
       } else {
-        fprintf(stdout, "To ingest files\n");
-        EnvOptions env_options;
-        const std::unordered_set<uint32_t>& cf_ids = GetWriteBatch()->GetColumnFamilyIDs();
-        std::vector<ColumnFamilyHandle*> cf_handles;
-        std::vector<Options> cf_options;
-        std::vector<Options*> cf_options_ptrs;
-        for (uint32_t cf_id : cf_ids) {
-          cf_handles_ptrs.emplace_back(db_impl_->GetColumnFamilyHandleUnlocked(cf_id));
-          ColumnFamilyHandle* cf_handle = cf_handles_ptrs.back().get();
-          cf_handles.emplace_back(cf_handle);
-          fprintf(stdout, "cf_id %d cf_handle %p\n", (int)cf_id, static_cast<void*>(cf_handle));
-          cf_options.emplace_back(db_->GetOptions(cf_handle));
+        if (ingest_batch_) {
+          fprintf(stdout, "Ingest WriteBatch directly\n");
+          const std::unordered_map<uint32_t, uint32_t>& cf_ids = GetWriteBatch()->GetColumnFamilyIDs();
+          for (auto cf : cf_ids) {
+            uint32_t cf_id = cf.first;
+            cf_handles_ptrs.emplace_back(db_impl_->GetColumnFamilyHandleUnlocked(cf_id));
+            ColumnFamilyHandle* cf_handle = cf_handles_ptrs.back().get();
+            // cf_handles.emplace_back(cf_handle);
+            fprintf(stdout, "cf_id %d cf_handle %p\n", (int)cf_id, static_cast<void*>(cf_handle));
+            cf_handles_.emplace_back(cf_handle);
+          }
+        } else {
+          std::vector<ColumnFamilyHandle*> cf_handles;
+          // fprintf(stdout, "To ingest files\n");
+          // EnvOptions env_options;
+          // const std::unordered_set<uint32_t>& cf_ids = GetWriteBatch()->GetColumnFamilyIDs();
+          // std::vector<ColumnFamilyHandle*> cf_handles;
+          // std::vector<Options> cf_options;
+          // std::vector<Options*> cf_options_ptrs;
+          // for (uint32_t cf_id : cf_ids) {
+          //   cf_handles_ptrs.emplace_back(db_impl_->GetColumnFamilyHandleUnlocked(cf_id));
+          //   ColumnFamilyHandle* cf_handle = cf_handles_ptrs.back().get();
+          //   cf_handles.emplace_back(cf_handle);
+          //   fprintf(stdout, "cf_id %d cf_handle %p\n", (int)cf_id, static_cast<void*>(cf_handle));
+          //   cf_options.emplace_back(db_->GetOptions(cf_handle));
+          // }
+          // for (size_t i = 0; i < cf_ids.size(); i++) {
+          //   cf_options_ptrs.emplace_back(&cf_options[i]);
+          // }
+          // s = PersistForCommit(env_options, cf_options_ptrs, cf_handles);
         }
-        for (size_t i = 0; i < cf_ids.size(); i++) {
-          cf_options_ptrs.emplace_back(&cf_options[i]);
-        }
-        s = PersistForCommit(env_options, cf_options_ptrs, cf_handles);
       }
     }
   }
@@ -994,7 +1008,7 @@ Status WriteCommittedTxn::CommitInternal() {
     return s;
   }
 
-  const bool use_file_ingestion = !to_ingest_files_.empty();
+  const bool use_file_ingestion = !to_ingest_files_.empty() || !cf_handles_.empty();
   if (!needs_ts) {
     s = WriteBatchInternal::MarkCommit(working_batch, name_);
   } else {
@@ -1067,19 +1081,31 @@ Status WriteCommittedTxn::CommitInternal() {
                           /*batch_cnt=*/0, /*pre_release_callback=*/nullptr,
                           post_mem_cb,
                           /*reserve_seqno_count=*/reserve_seqno_count);
+  // TODO: handle empty batch
   if (s.ok() && use_file_ingestion) {
-    IngestExternalFileOptions options;
-    options.move_files = true;
-    options.failed_move_fall_back_to_copy = false;
-    options.flush = true;
-    std::vector<IngestExternalFileArg> args(to_ingest_files_.size());
-    for (size_t i = 0; i < to_ingest_files_.size(); ++i) {
-      args[i].column_family = cf_handles_[i];
-      args[i].external_files.emplace_back(to_ingest_files_[i].file_path);
-      args[i].options = options;
+    if (ingest_batch_) {
+      // Assign log_number_ to WBWI.
+      s = db_impl_->IngestWBWI(cf_handles_, write_batch_, log_number_);
+      fprintf(stdout, "WBWI Ingestion %s\n", s.ToString().c_str());
+    } else {
+      // Create Flushable
+      // IngestFlushable(wbwbi)
+      IngestExternalFileOptions options;
+      options.move_files = true;
+      options.failed_move_fall_back_to_copy = false;
+      options.flush = true;
+      std::vector<IngestExternalFileArg> args(to_ingest_files_.size());
+      for (size_t i = 0; i < to_ingest_files_.size(); ++i) {
+        args[i].column_family = cf_handles_[i];
+        args[i].external_files.emplace_back(to_ingest_files_[i].file_path);
+        args[i].options = options;
+      }
+      s = db_impl_->IngestExternalFiles(args);
+      fprintf(stdout, "File Ingestion %s\n", s.ToString().c_str());
     }
-    s = db_impl_->IngestExternalFiles(args);
-    fprintf(stdout, "File Ingestion %s\n", s.ToString().c_str());
+    assert(s.ok());
+    cf_handles_.clear();
+    to_ingest_batch_.clear();
   }
   // TODO: what is seq used
   assert(!s.ok() || seq_used != kMaxSequenceNumber);

@@ -1456,7 +1456,7 @@ WithBlocklikeCheck<Status, TBlocklike> BlockBasedTable::PutDataBlockToCache(
   rep_->create_context.Create(&block_holder,
                               std::move(uncompressed_block_contents));
 
-  // insert into uncompressed block cache
+  // insert into uncompressed block cache // TODO: manual compaction and check this cache code path
   if (block_cache && block_holder->own_bytes()) {
     size_t charge = block_holder->ApproximateMemoryUsage();
     BlockCacheTypedHandle<TBlocklike>* cache_handle = nullptr;

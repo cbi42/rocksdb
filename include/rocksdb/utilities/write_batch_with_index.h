@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <db/memtable.h>
 
 #include "rocksdb/comparator.h"
 #include "rocksdb/iterator.h"
@@ -43,6 +44,18 @@ enum WriteType {
   kXIDRecord,
   kPutEntityRecord,
   kUnknownRecord,
+};
+
+const std::map<WriteType, ValueType> WriteTypeToValueTypeMap = {
+  {kPutRecord, kTypeValue},
+  {kMergeRecord, kTypeMerge},
+  {kDeleteRecord, kTypeDeletion},
+  {kSingleDeleteRecord, kTypeSingleDeletion},
+  {kDeleteRangeRecord, kTypeRangeDeletion},
+  // {kLogDataRecord, kTypeLogData},
+  // {kXIDRecord, kTypeBeginPrepareXID},
+  {kPutEntityRecord, kTypeWideColumnEntity},
+  // {kUnknownRecord, kTypeNoop}
 };
 
 // An entry for Put, PutEntity, Merge, Delete, or SingleDelete for write
@@ -352,7 +365,7 @@ class WriteBatchWithIndex : public WriteBatchBase {
   void SetMaxBytes(size_t max_bytes) override;
   size_t GetDataSize() const;
 
-  const std::unordered_set<uint32_t>& GetColumnFamilyIDs() const;
+  const std::unordered_map<uint32_t, uint32_t>& GetColumnFamilyIDs() const;
 
   bool HasDuplicateKeys() const;
 
@@ -405,6 +418,220 @@ class WriteBatchWithIndex : public WriteBatchBase {
 
   struct Rep;
   std::unique_ptr<Rep> rep;
+};
+
+class FlushableWriteBatchWithIndexIterator : public InternalIterator {
+  public:
+  FlushableWriteBatchWithIndexIterator(std::shared_ptr<WBWIIterator>it, SequenceNumber seqno,
+    const Comparator* comparator) : it_(it), global_seqno_(seqno), comparator_(comparator) {
+  }
+  bool Valid() const override {
+    return it_->Valid();
+  }
+  void SeekToFirst() override {
+    it_->SeekToFirst();
+    UpdateKey();
+  }
+  void SeekToLast() override {
+    it_->SeekToLast();
+    UpdateKey();
+  }
+  void Seek(const Slice& target) override {
+    it_->Seek(ExtractUserKey(target));
+    if (it_->Valid()) {
+      // compare seqno
+      SequenceNumber seqno = GetInternalKeySeqno(target);
+      if (seqno < global_seqno_ && comparator_->Compare(it_->Entry().key, target) == 0) {
+        it_->Next();
+      }
+    }
+    UpdateKey();
+  }
+  void SeekForPrev(const Slice& target) override {
+    it_->SeekForPrev(ExtractUserKey(target));
+    if (it_->Valid()) {
+      SequenceNumber seqno = GetInternalKeySeqno(target);
+      if (seqno > global_seqno_ && comparator_->Compare(it_->Entry().key, target) == 0) {
+        it_->Prev();
+      }
+    }
+    UpdateKey();
+  }
+  void Next() override {
+    assert(Valid());
+    it_->Next();
+    UpdateKey();
+  }
+  bool NextAndGetResult(IterateResult* result) override {
+    assert(Valid());
+    Next();
+    bool is_valid = Valid();
+    if (is_valid) {
+      result->key = key();
+      result->bound_check_result = IterBoundCheck::kUnknown;
+      result->value_prepared = true;
+    }
+    return is_valid;
+  };
+  void Prev() override {
+    assert(Valid());
+    it_->Prev();
+    UpdateKey();
+  }
+  Slice key() const override {
+    assert(Valid());
+    return key_;
+  }
+  Slice value() const override {
+    assert(Valid());
+    return it_->Entry().value;
+  }
+  Status status() const override {
+    return it_->status();
+  }
+  private:
+  void UpdateKey() {
+    if (!Valid()) {
+      return;
+    }
+    key_buf_.Clear();
+    assert(WriteTypeToValueTypeMap.find(it_->Entry().type) != WriteTypeToValueTypeMap.end());
+    ValueType t = WriteTypeToValueTypeMap.at(it_->Entry().type);
+    key_buf_.SetInternalKey(it_->Entry().key, global_seqno_, t);
+    key_ = key_buf_.GetInternalKey();
+  }
+  std::shared_ptr<WBWIIterator> it_;
+  SequenceNumber global_seqno_;
+  const Comparator* comparator_;
+  IterKey key_buf_;
+  Slice key_;
+};
+
+class FlushableWriteBatchWithIndex : public Flushable {
+  friend class WriteBatchWithIndex;
+public:
+  // TODO: assign seqno
+  // TODO: initialize necessary memtable fields in constructor by iterating though wbwi
+  FlushableWriteBatchWithIndex(std::shared_ptr<WriteBatchWithIndex> wbwi, const Comparator* cmp, uint32_t cf_id, const ImmutableOptions* immutable_options, const MutableCFOptions* cf_options):
+    wbwi_(wbwi), comparator_(cmp), key_comparator_(comparator_),
+  cf_id_(cf_id), moptions_(*immutable_options, *cf_options),
+  clock_(immutable_options->clock),
+  refs_(0) {
+    atomic_flush_seqno_ = kMaxSequenceNumber;
+  }
+  ~FlushableWriteBatchWithIndex() override {
+    fprintf(stdout, "Destruct refs = %d\n", refs_);
+  }
+  uint64_t GetMinLogContainingPrepSection() override {
+    assert(min_prep_log_referenced_ != 0);
+    return min_prep_log_referenced_;
+  }
+  MemTableStats ApproximateStats(const Slice& , const Slice& ) override {
+    return {};
+  }
+  uint64_t ApproximateOldestKeyTime() const override {
+    return kUnknownOldestAncesterTime;
+  }
+  std::unique_ptr<FlushJobInfo> ReleaseFlushJobInfo() override {
+    return nullptr;
+  }
+  const InternalKeyComparator& GetInternalKeyComparator() const override {
+    return key_comparator_;
+  }
+  size_t ApproximateMemoryUsage() override ;
+  void Ref() override {
+    ++refs_;
+    fprintf(stdout, "Ref %d\n", refs_);
+  };
+  void MultiGet(const ReadOptions& , MultiGetRange* , ReadCallback* , bool ) override {};
+  bool Get(const LookupKey& key, std::string* value,
+           PinnableWideColumns* columns, std::string* timestamp, Status* s,
+           MergeContext* merge_context,
+           SequenceNumber* max_covering_tombstone_seq, SequenceNumber* seq,
+           const ReadOptions& read_opts, bool immutable_memtable,
+           ReadCallback* callback = nullptr, bool* is_blob_index = nullptr,
+           bool do_merge = true) override ;
+  bool Get(const LookupKey& key, std::string* value,
+           PinnableWideColumns* columns, std::string* timestamp, Status* s,
+           MergeContext* merge_context,
+           SequenceNumber* max_covering_tombstone_seq,
+           const ReadOptions& read_opts, bool immutable_memtable,
+           ReadCallback* callback = nullptr, bool* is_blob_index = nullptr,
+           bool do_merge = true) override {
+    SequenceNumber seq;
+    return Get(key, value, columns, timestamp, s, merge_context,
+               max_covering_tombstone_seq, &seq, read_opts, immutable_memtable,
+               callback, is_blob_index, do_merge);
+  };
+  bool IsFragmentedRangeTombstonesConstructed() const override {
+    return true;
+  }
+  FragmentedRangeTombstoneIterator* NewRangeTombstoneIterator(const ReadOptions& , SequenceNumber , bool ) override {
+    return nullptr;
+  }
+  InternalIterator* NewIterator(const ReadOptions& , UnownedPtr<const SeqnoToTimeMapping> , Arena* ) override {
+    assert(global_seqno_ != kMaxSequenceNumber);
+    std::shared_ptr<WBWIIterator>it{wbwi_->NewIterator(cf_id_)};
+    return new FlushableWriteBatchWithIndexIterator(it, global_seqno_, comparator_);
+  }
+  uint64_t num_entries() const override {
+    uint64_t n = wbwi_->GetColumnFamilyIDs().at(cf_id_);
+    return n;
+  }
+  uint64_t num_deletes() const override {
+    return 0;
+  }
+  SequenceNumber GetEarliestSequenceNumber() override {
+    return global_seqno_;
+  }
+  SequenceNumber GetFirstSequenceNumber() override {
+    return global_seqno_;
+  }
+  void MarkFlushed() override {};
+  size_t MemoryAllocatedBytes() const override {
+    return 0;
+  }
+  uint64_t GetID() const override {
+    return id_;
+  }
+  void SetNextLogNumber(uint64_t num) override {
+    next_log_number_ = num;
+  }
+  uint64_t GetNextLogNumber() override {
+    assert(next_log_number_ != 0);
+    return next_log_number_;
+  }
+  bool UnrefFlushable() override {
+    --refs_;
+    fprintf(stdout, "Unref %d\n", refs_);
+    assert(refs_ >= 0);
+    return refs_ == 0;
+  }
+  void MarkImmutable() override {
+    // ok
+  }
+  bool SetGlobalSequenceNumber (SequenceNumber global_seqno) override {
+    global_seqno_ = global_seqno;
+    return true;
+  }
+  void SetID(uint64_t id) override {
+    id_ = id;
+  }
+  void SetMinPrepLog(uint64_t id) {
+    min_prep_log_referenced_ = id;
+  }
+private:
+  std::shared_ptr<WriteBatchWithIndex> wbwi_;
+  const Comparator* comparator_;
+  InternalKeyComparator key_comparator_;
+  uint32_t cf_id_;
+  SequenceNumber global_seqno_ = kMaxSequenceNumber;
+  const ImmutableMemTableOptions moptions_;
+  SystemClock* clock_;
+  int refs_;
+  uint64_t id_{0};
+  uint64_t min_prep_log_referenced_{0};
+  uint64_t next_log_number_{0};
 };
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -391,6 +391,11 @@ class ColumnFamilyData {
     mem_ = new_mem;
   }
 
+  void AssignFlushableID(Flushable* new_f) {
+    uint64_t memtable_id = last_memtable_id_.fetch_add(1) + 1;
+    new_f->SetID(memtable_id);
+  }
+
   // calculate the oldest log needed for the durability of this column family
   uint64_t OldestLogToKeep();
 

@@ -125,7 +125,7 @@ class MemTableListVersion {
 
   uint64_t GetTotalNumDeletes() const;
 
-  MemTable::MemTableStats ApproximateStats(const Slice& start_ikey,
+  MemTableStats ApproximateStats(const Slice& start_ikey,
                                            const Slice& end_ikey);
 
   // Returns the value of MemTable::GetEarliestSequenceNumber() on the most
@@ -155,16 +155,16 @@ class MemTableListVersion {
       LogBuffer* log_buffer);
 
   // REQUIRE: m is an immutable memtable
-  void Add(MemTable* m, autovector<MemTable*>* to_delete);
+  void Add(Flushable* m, autovector<MemTable*>* to_delete);
   // REQUIRE: m is an immutable memtable
-  void Remove(MemTable* m, autovector<MemTable*>* to_delete);
+  void Remove(Flushable* m, autovector<MemTable*>* to_delete);
 
   // Return true if memtable is trimmed
   bool TrimHistory(autovector<MemTable*>* to_delete, size_t usage);
 
   bool TrimAllHistory();
 
-  bool GetFromList(std::list<MemTable*>* list, const LookupKey& key,
+  bool GetFromList(std::list<Flushable*>* list, const LookupKey& key,
                    std::string* value, PinnableWideColumns* columns,
                    std::string* timestamp, Status* s,
                    MergeContext* merge_context,
@@ -173,9 +173,9 @@ class MemTableListVersion {
                    ReadCallback* callback = nullptr,
                    bool* is_blob_index = nullptr);
 
-  void AddMemTable(MemTable* m);
+  void AddMemTable(Flushable* m);
 
-  void UnrefMemTable(autovector<MemTable*>* to_delete, MemTable* m);
+  void UnrefMemTable(autovector<MemTable*>* to_delete, Flushable* m);
 
   // Calculate the total amount of memory used by memlist_ and memlist_history_
   // excluding the last MemTable in memlist_history_. The reason for excluding
@@ -190,11 +190,11 @@ class MemTableListVersion {
   bool MemtableLimitExceeded(size_t usage);
 
   // Immutable MemTables that have not yet been flushed.
-  std::list<MemTable*> memlist_;
+  std::list<Flushable*> memlist_;
 
   // MemTables that have already been flushed
   // (used during Transaction validation)
-  std::list<MemTable*> memlist_history_;
+  std::list<Flushable*> memlist_history_;
 
   // Maximum number of MemTables to keep in memory (including both flushed
   const int max_write_buffer_number_to_maintain_;
@@ -306,7 +306,7 @@ class MemTableList {
   // By default, adding memtables will flag that the memtable list needs to be
   // flushed, but in certain situations, like after a mempurge, we may want to
   // avoid flushing the memtable list upon addition of a memtable.
-  void Add(MemTable* m, autovector<MemTable*>* to_delete);
+  void Add(Flushable* m, autovector<MemTable*>* to_delete);
 
   // Returns an estimate of the number of bytes of data in use.
   size_t ApproximateMemoryUsage();
@@ -379,6 +379,8 @@ class MemTableList {
 
   // Returns the min log containing the prep section after memtables listsed in
   // `memtables_to_flush` are flushed and their status is persisted in manifest.
+  // This means that if we are flushing multiple memtables together into a single file,
+  // we should pass into all memtables
   uint64_t PrecomputeMinLogContainingPrepSection(
       const std::unordered_set<MemTable*>* memtables_to_flush = nullptr);
 
@@ -398,7 +400,7 @@ class MemTableList {
     if (for_atomic_flush) {
       // Scan the memtable list from new to old
       for (auto it = memlist.begin(); it != memlist.end(); ++it) {
-        MemTable* m = *it;
+        auto* m = *it;
         if (m->atomic_flush_seqno_ != kMaxSequenceNumber) {
           return m->GetID();
         }
@@ -418,11 +420,11 @@ class MemTableList {
     // Iterating through the memlist starting at the end, the vector<MemTable*>
     // ret is filled with memtables already sorted in increasing MemTable ID.
     for (auto it = memlist.rbegin(); it != memlist.rend(); ++it) {
-      MemTable* m = *it;
+      auto m = *it;
       if (m->GetID() > max_memtable_id) {
         break;
       }
-      newest_udts.push_back(m->GetNewestUDT());
+      newest_udts.push_back(static_cast<MemTable*>(m)->GetNewestUDT());
     }
     return newest_udts;
   }
@@ -431,7 +433,7 @@ class MemTableList {
     const auto& memlist = current_->memlist_;
     // Scan the memtable list from new to old
     for (auto it = memlist.begin(); it != memlist.end(); ++it) {
-      MemTable* mem = *it;
+      auto mem = *it;
       if (mem->atomic_flush_seqno_ == kMaxSequenceNumber) {
         mem->atomic_flush_seqno_ = seq;
       } else {

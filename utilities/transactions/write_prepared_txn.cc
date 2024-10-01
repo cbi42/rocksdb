@@ -67,7 +67,7 @@ void WritePreparedTxn::MultiGet(const ReadOptions& _read_options,
       read_options.snapshot, &min_uncommitted, &snap_seq);
   WritePreparedTxnReadCallback callback(wpt_db_, snap_seq, min_uncommitted,
                                         backed_by_snapshot);
-  write_batch_.MultiGetFromBatchAndDB(db_, read_options, column_family,
+  write_batch_->MultiGetFromBatchAndDB(db_, read_options, column_family,
                                       num_keys, keys, values, statuses,
                                       sorted_input, &callback);
   if (UNLIKELY(!callback.valid() ||
@@ -105,7 +105,7 @@ Status WritePreparedTxn::GetImpl(const ReadOptions& options,
       wpt_db_->AssignMinMaxSeqs(options.snapshot, &min_uncommitted, &snap_seq);
   WritePreparedTxnReadCallback callback(wpt_db_, snap_seq, min_uncommitted,
                                         backed_by_snapshot);
-  Status res = write_batch_.GetFromBatchAndDB(db_, options, column_family, key,
+  Status res = write_batch_->GetFromBatchAndDB(db_, options, column_family, key,
                                               pinnable_val, &callback);
   const bool callback_valid =
       callback.valid();  // NOTE: validity of callback must always be checked
@@ -132,7 +132,7 @@ Iterator* WritePreparedTxn::GetIterator(const ReadOptions& options,
   Iterator* db_iter = wpt_db_->NewIterator(options, column_family);
   assert(db_iter);
 
-  return write_batch_.NewIteratorWithBase(column_family, db_iter, &options);
+  return write_batch_->NewIteratorWithBase(column_family, db_iter, &options);
 }
 
 Status WritePreparedTxn::PrepareInternal() {
