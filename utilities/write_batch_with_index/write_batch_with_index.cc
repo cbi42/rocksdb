@@ -57,6 +57,7 @@ struct WriteBatchWithIndex::Rep {
 
   // In overwrite mode, find the existing entry for the same key and update it
   // to point to the current entry.
+  // If there are multiple entries with key, will update the last one.
   // Return true if the key is found and updated.
   bool UpdateExistingEntry(ColumnFamilyHandle* column_family, const Slice& key,
                            WriteType type);
@@ -105,6 +106,7 @@ bool WriteBatchWithIndex::Rep::UpdateExistingEntryWithCfId(
   } else {
     has_duplicated_keys = true;
     // Move to the end of this key (NextKey-Prev)
+    // Consider Merge, Put, Merge. How does it work?
     iter.NextKey();  // Move to the next key
     if (iter.Valid()) {
       iter.Prev();  // Move back one entry
@@ -119,6 +121,8 @@ bool WriteBatchWithIndex::Rep::UpdateExistingEntryWithCfId(
     sub_batch_cnt++;
   }
   if (type == kMergeRecord) {
+    // So if Merge, we just insert an entry. If Put, we overwrite.
+    // During read, we iterate and remember all keys?
     return false;
   } else {
     non_const_entry->offset = last_entry_offset;
@@ -1165,14 +1169,23 @@ size_t FlushableWriteBatchWithIndex::ApproximateMemoryUsage() {
                    bool* /*is_blob_index*/, bool do_merge) {
   // TODO: what about read options snapshot?
   // Given key
+
+  // TODO: is this too reliant on LookupKey seqno?
+  ValueType read_type;
+  SequenceNumber read_seq;
+  UnPackSequenceAndType(ExtractInternalKeyFooter(key.internal_key()), &read_seq, &read_type);
   bool found_final_result = false;
   std::unique_ptr<InternalIterator> iter{NewIterator(read_opts, nullptr, nullptr)};
   iter->Seek(key.internal_key());
-  // Only need to look at the one key, we assume no duplicate keys.
-  // Also assume no range del
-  // Assume only Put, DEL, SINGLEDEL
-  if (iter->Valid()) {
-    if (comparator_->EqualWithoutTimestamp(ExtractUserKey(iter->key()), key.user_key())) {
+  // assume no range del
+  // Assume only Put, DEL, SINGLEDEL, MERGR
+  // Need to look at all keys with same user key
+  // WBWI iterator orders keys by when they are added to the write batch
+  // For Get, we need to look at reverse order
+  std::vector<WriteEntry> entries;
+  // if (iter->Valid()) {
+  while (iter->Valid() && comparator_->EqualWithoutTimestamp(ExtractUserKey(iter->key()), key.user_key())) {
+    // if (comparator_->EqualWithoutTimestamp(ExtractUserKey(iter->key()), key.user_key())) {
       uint64_t tag = ExtractInternalKeyFooter(iter->key());
       ValueType type;
       SequenceNumber seq;
@@ -1183,7 +1196,6 @@ size_t FlushableWriteBatchWithIndex::ApproximateMemoryUsage() {
         switch (type) {
           case kTypeValue: {
             found_final_result = true;
-
             if (!do_merge) {
               merge_context->PushOperand(iter->value(), /*operand_pinned=*/iter->IsValuePinned());
             } else if (s->IsMergeInProgress()) {
@@ -1199,8 +1211,12 @@ size_t FlushableWriteBatchWithIndex::ApproximateMemoryUsage() {
               columns->SetPlainValue(iter->value());
             }
             *s = Status::OK();
+            if (seq > read_seq) {
+              fprintf(stdout, "Read PUT %s with seq %dand read_seq%d\n", key.user_key().ToString().c_str(), (int)seq, (int)read_seq);
+            }
             return found_final_result;
           }
+            break;
           case kTypeDeletion:
           case kTypeSingleDeletion: {
             if (s->IsMergeInProgress()) {
@@ -1223,9 +1239,48 @@ size_t FlushableWriteBatchWithIndex::ApproximateMemoryUsage() {
             } else {
               *s = Status::NotFound();
             }
+            if (seq > read_seq) {
+              fprintf(stdout, "Read DEL %s with seq %dand read_seq%d\n", key.user_key().ToString().c_str(), (int)seq, (int)read_seq);
+            }
             found_final_result = true;
             return found_final_result;
           }
+            break;
+          case kTypeMerge: {
+            if (!moptions_.merge_operator) {
+              *s = Status::InvalidArgument(
+              "merge_operator is not properly initialized.");
+              found_final_result = true;
+              return found_final_result;
+            }
+            merge_context->PushOperand(iter->value(), iter->IsValuePinned());
+            // Will be updated to ok status if a final value is found
+            *s = Status::MergeInProgress();
+            if (do_merge && moptions_.merge_operator->ShouldMerge(merge_context->GetOperandsDirectionBackward())) {
+              if (value || columns) {
+                *s = MergeHelper::TimedFullMerge(
+                moptions_.merge_operator, key.user_key(),
+                MergeHelper::kNoBaseValue, merge_context->GetOperands(),
+                moptions_.info_log, moptions_.statistics, clock_,
+                /* update_num_ops_stats */ true, /* op_failure_scope */ nullptr,
+                value, columns);
+              } else {
+                assert(s->IsMergeInProgress());
+              }
+              found_final_result = true;
+              return found_final_result;
+            }
+            if (merge_context->get_merge_operands_options != nullptr &&
+              merge_context->get_merge_operands_options->continue_cb != nullptr &&
+              !merge_context->get_merge_operands_options->continue_cb(iter->value())) {
+              // We were told not to continue.
+              found_final_result = true;
+              return found_final_result;
+           }
+            // we read a merge operand and is not found, should continue to the next key
+            found_final_result = false;
+          }
+            break;
           default: {
             std::string msg("Corrupted value not expected.");
             msg.append("Unrecognized value type: " +
@@ -1238,8 +1293,12 @@ size_t FlushableWriteBatchWithIndex::ApproximateMemoryUsage() {
             return found_final_result;
           }
         }
-      }
+      // }
+    } else {
+      return found_final_result;
     }
+    // Current key not visible
+    iter->Next();
   }
   return found_final_result;
 }

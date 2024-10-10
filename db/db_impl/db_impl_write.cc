@@ -199,7 +199,11 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
                          uint64_t* seq_used, size_t batch_cnt,
                          PreReleaseCallback* pre_release_callback,
                          PostMemTableCallback* post_memtable_callback,
-                         uint64_t reserve_seqno_count) {
+                         uint64_t reserve_seqno_count, std::vector<ColumnFamilyHandle*> column_family_handles,
+    std::shared_ptr<WriteBatchWithIndex> wbwi,
+    uint64_t min_prep_log,
+    const std::string& txn_name) {
+  assert(reserve_seqno_count == 0 || wbwi);
   assert(!seq_per_batch_ || batch_cnt != 0);
   assert(my_batch == nullptr || my_batch->Count() == 0 ||
          write_options.protection_bytes_per_key == 0 ||
@@ -299,7 +303,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     }
   }
 
-  if (two_write_queues_ && disable_memtable) {
+  if (two_write_queues_ && disable_memtable) { // TODO: read this part
     AssignOrder assign_order =
         seq_per_batch_ ? kDoAssignOrder : kDontAssignOrder;
     // Otherwise it is WAL-only Prepare batches in WriteCommitted policy and
@@ -345,7 +349,9 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
   WriteThread::Writer w(write_options, my_batch, callback, user_write_cb,
                         log_ref, disable_memtable, batch_cnt,
-                        pre_release_callback, post_memtable_callback);
+                        pre_release_callback, post_memtable_callback, reserve_seqno_count);
+  fprintf(stdout, "Writer txn %s reserve_seq %d\n", txn_name.c_str(), (int)reserve_seqno_count);
+  fflush(stdout);
   StopWatch write_sw(immutable_db_options_.clock, stats_, DB_WRITE);
 
   write_thread_.JoinBatchGroup(&w);
@@ -400,6 +406,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       *seq_used = w.sequence;
     }
     // write is complete and leader has updated sequence
+
     return w.FinalStatus();
   }
   // else we are the leader of the write batch group
@@ -424,6 +431,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // PreprocessWrite does its own perf timing.
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
+    // If Memtable switch happens here, it's ok, too. Commit record will be in a new WAL
+    // which maps to new memtable.
     status = PreprocessWrite(write_options, &log_context, &write_context);
     if (!two_write_queues_) {
       // Assign it after ::PreprocessWrite since the sequence might advance
@@ -440,8 +449,13 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   // into memtables
 
   TEST_SYNC_POINT("DBImpl::WriteImpl:BeforeLeaderEnters");
+  // TODO: Do we only start fixing memtable and WAL here?
   last_batch_group_size_ =
       write_thread_.EnterAsBatchGroupLeader(&w, &write_group);
+  // TODO: improve
+  if (reserve_seqno_count) {
+    assert(write_group.size == 1);
+  }
 
   IOStatus io_s;
   Status pre_release_cb_status;
@@ -469,6 +483,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
         valid_batches += writer->batch_cnt;
         if (writer->ShouldWriteToMemtable()) {
           total_count += WriteBatchInternal::Count(writer->batch);
+          total_count += writer->reserve_seqno_count;
+          // Add reserved count here
           total_byte_size = WriteBatchInternal::AppendedByteSize(
               total_byte_size, WriteBatchInternal::ByteSize(writer->batch));
           parallel = parallel && !writer->batch->HasMerge();
@@ -499,7 +515,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // memtable it still consumes a seq. Otherwise, if !seq_per_batch_, we inc
     // the seq per valid written key to mem.
     size_t seq_inc = seq_per_batch_ ? valid_batches : total_count;
-    seq_inc += reserve_seqno_count;
+    // seq_inc += reserve_seqno_count;
 
     const bool concurrent_update = two_write_queues_;
     // Update stats while we are an exclusive group leader, so we know
@@ -691,6 +707,13 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       // Note: if we are to resume after non-OK statuses we need to revisit how
       // we reacts to non-OK statuses here.
       versions_->SetLastSequence(last_sequence);
+      // TODO: is this the right place? After status is set // TODO: there maybe some seqno sanity checks we can assert here
+      if (w.status.ok() && reserve_seqno_count > 0) {
+        fprintf(stdout, "From write thread \n");
+        fflush(stdout);
+        // switch memtable
+        w.status = IngestWBWI(column_family_handles, wbwi, min_prep_log, txn_name, /*from_write_thread=*/true);
+      }
     }
     MemTableInsertStatusCheck(w.status);
     write_thread_.ExitAsBatchGroupLeader(write_group, status);
@@ -943,6 +966,7 @@ Status DBImpl::UnorderedWriteMemtable(const WriteOptions& write_options,
 // The 2nd write queue. If enabled it will be used only for WAL-only writes.
 // This is the only queue that updates LastPublishedSequence which is only
 // applicable in a two-queue setting.
+  // TODO: check if this one switches WAL or memtable
 Status DBImpl::WriteImplWALOnly(
     WriteThread* write_thread, const WriteOptions& write_options,
     WriteBatch* my_batch, WriteCallback* callback,
@@ -2268,6 +2292,9 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context, Flus
   if (s.ok()) {
     // SwitchMemtable here assigns seq as latest sequence number
     SequenceNumber seq = versions_->LastSequence();
+    if (new_imm) {
+      ++seq;
+    }
     new_mem = cfd->ConstructNewMemtable(mutable_cf_options, seq);
     context->superversion_context.NewSuperVersion();
 

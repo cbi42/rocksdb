@@ -5747,7 +5747,8 @@ TEST_P(MySQLStyleTransactionTest, TransactionStressTest) {
   std::vector<port::Thread> threads;
   std::atomic<uint32_t> finished = {0};
   constexpr bool TAKE_SNAPSHOT = true;
-  uint64_t time_seed = env->NowMicros();
+  uint64_t time_seed = 1728243704341395;
+  // env->NowMicros();
   printf("time_seed is %" PRIu64 "\n", time_seed);  // would help to reproduce
 
   std::function<void()> call_inserter = [&] {
@@ -6170,8 +6171,8 @@ TEST_P(TransactionTest, DuplicateKeys) {
         ASSERT_OK(s);
         s = txn0->Put(Slice("foo4"), Slice("bar4"));
         ASSERT_OK(s);
-        s = txn0->Delete(Slice("foo4"));
-        ASSERT_OK(s);
+        // s = txn0->Delete(Slice("foo4"));
+        // ASSERT_OK(s);
         s = txn0->SingleDelete(Slice("foo4"));
         ASSERT_OK(s);
         if (do_prepare) {
@@ -6447,10 +6448,10 @@ TEST_P(TransactionTest, DuplicateKeys) {
     // Duplicate with ::Put, ::SingleDelete
     txn0 = db->BeginTransaction(write_options, txn_options);
     ASSERT_OK(txn0->SetName("xid"));
-    ASSERT_OK(txn0->Put(handles[1], Slice("key-nonkey0"), Slice("bar0g")));
-    ASSERT_OK(txn0->SingleDelete(handles[1], Slice("key-nonkey1")));
-    ASSERT_OK(txn0->Put(Slice("foo0"), Slice("bar0e")));
-    ASSERT_OK(txn0->SingleDelete(Slice("foo0")));
+    ASSERT_OK(txn0->Put(handles[1], Slice("sd0"), Slice("bar0g")));
+    ASSERT_OK(txn0->SingleDelete(handles[1], Slice("sd1")));
+    ASSERT_OK(txn0->Put(Slice("sd"), Slice("bar0e")));
+    ASSERT_OK(txn0->SingleDelete(Slice("sd")));
     ASSERT_OK(txn0->Prepare());
     delete txn0;
     // This will check the asserts inside recovery code

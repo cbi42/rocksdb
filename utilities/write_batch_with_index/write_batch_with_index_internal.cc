@@ -436,6 +436,7 @@ void BaseDeltaIterator::UpdateCurrent() {
 #endif  // __clang_analyzer__
 }
 
+  // TODO: really need to do AdvanceKey() due to Merge issues
 void WBWIIteratorImpl::AdvanceKey(bool forward) {
   if (Valid()) {
     Slice key = Entry().key;
@@ -622,6 +623,7 @@ Status ReadableWriteBatch::GetEntryFromDataOffset(size_t data_offset,
 //    and the entry with larger key will be larger;
 // 3. If two entries are of the same CF and key, the one with larger offset
 //    will be larger.
+  // TODO: Should this be the case? What happens when reading your own write
 // Some times either `entry1` or `entry2` is dummy entry, which is actually
 // a search key. In this case, in step 2, we don't go ahead and decode the
 // entry but use the value in WriteBatchIndexEntry::search_key.

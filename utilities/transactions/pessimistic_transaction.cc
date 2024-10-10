@@ -965,18 +965,25 @@ Status WriteCommittedTxn::CommitInternal() {
   std::vector<std::unique_ptr<ColumnFamilyHandle>> cf_handles_ptrs;
   if (use_ingestion_) {
     if (to_ingest_files_.empty()) {
-      if (GetWriteBatch()->HasDuplicateKeys()) {
+      if (false && GetWriteBatch()->HasDuplicateKeys()) {
         fprintf(stdout, "Duplicated keys not supported, fall back to normal commit %s\n", GetName().c_str());
       } else {
         if (ingest_batch_) {
-          fprintf(stdout, "Ingest WriteBatch directly\n");
+          fprintf(stdout, "Transaction %s Ingest WriteBatch directly, has_delete:%d, count: %d\n", GetName().c_str(), GetWriteBatch()->GetWriteBatch()->HasDelete(), GetWriteBatch()->GetWriteBatch()->Count());
           const std::unordered_map<uint32_t, uint32_t>& cf_ids = GetWriteBatch()->GetColumnFamilyIDs();
           for (auto cf : cf_ids) {
+            // auto iter = GetWriteBatch()->NewIterator(cf.first);
+            // iter->SeekToFirst();
+            // while (iter->Valid()) {
+            //   fprintf(stdout, "cf_id %d key %s value %s, type %d\n", (int)cf.first, iter->Entry().key.ToString().c_str(), iter->Entry().value.ToString().c_str(), (int)iter->Entry().type);
+            //   iter->Next();
+            // }
+            // delete iter;
             uint32_t cf_id = cf.first;
             cf_handles_ptrs.emplace_back(db_impl_->GetColumnFamilyHandleUnlocked(cf_id));
             ColumnFamilyHandle* cf_handle = cf_handles_ptrs.back().get();
             // cf_handles.emplace_back(cf_handle);
-            fprintf(stdout, "cf_id %d cf_handle %p\n", (int)cf_id, static_cast<void*>(cf_handle));
+            // fprintf(stdout, "cf_id %d cf_handle %p\n", (int)cf_id, static_cast<void*>(cf_handle));
             cf_handles_.emplace_back(cf_handle);
           }
         } else {
@@ -1003,7 +1010,7 @@ Status WriteCommittedTxn::CommitInternal() {
     }
   }
   if (!s.ok()) {
-    fprintf(stderr, "%s\n", s.ToString().c_str());
+    fprintf(stderr, "Prepare Fail %s\n", s.ToString().c_str());
     fflush(stderr);
     return s;
   }
@@ -1080,30 +1087,31 @@ Status WriteCommittedTxn::CommitInternal() {
                           /*disable_memtable*/ false, &seq_used,
                           /*batch_cnt=*/0, /*pre_release_callback=*/nullptr,
                           post_mem_cb,
-                          /*reserve_seqno_count=*/reserve_seqno_count);
+                          /*reserve_seqno_count=*/reserve_seqno_count,
+                          cf_handles_, write_batch_, log_number_, name_);
   // TODO: handle empty batch
   if (s.ok() && use_file_ingestion) {
-    if (ingest_batch_) {
-      // Assign log_number_ to WBWI.
-      s = db_impl_->IngestWBWI(cf_handles_, write_batch_, log_number_);
-      fprintf(stdout, "WBWI Ingestion %s\n", s.ToString().c_str());
-    } else {
-      // Create Flushable
-      // IngestFlushable(wbwbi)
-      IngestExternalFileOptions options;
-      options.move_files = true;
-      options.failed_move_fall_back_to_copy = false;
-      options.flush = true;
-      std::vector<IngestExternalFileArg> args(to_ingest_files_.size());
-      for (size_t i = 0; i < to_ingest_files_.size(); ++i) {
-        args[i].column_family = cf_handles_[i];
-        args[i].external_files.emplace_back(to_ingest_files_[i].file_path);
-        args[i].options = options;
-      }
-      s = db_impl_->IngestExternalFiles(args);
-      fprintf(stdout, "File Ingestion %s\n", s.ToString().c_str());
-    }
-    assert(s.ok());
+    // if (ingest_batch_) {
+    //   // Assign log_number_ to WBWI.
+    //   s = db_impl_->IngestWBWI(cf_handles_, write_batch_, log_number_, name_);
+    //   fprintf(stdout, "WBWI Ingestion %s\n", s.ToString().c_str());
+    // } else {
+    //   // Create Flushable
+    //   // IngestFlushable(wbwbi)
+    //   IngestExternalFileOptions options;
+    //   options.move_files = true;
+    //   options.failed_move_fall_back_to_copy = false;
+    //   options.flush = true;
+    //   std::vector<IngestExternalFileArg> args(to_ingest_files_.size());
+    //   for (size_t i = 0; i < to_ingest_files_.size(); ++i) {
+    //     args[i].column_family = cf_handles_[i];
+    //     args[i].external_files.emplace_back(to_ingest_files_[i].file_path);
+    //     args[i].options = options;
+    //   }
+    //   s = db_impl_->IngestExternalFiles(args);
+    //   fprintf(stdout, "File Ingestion %s\n", s.ToString().c_str());
+    // }
+    // assert(s.ok());
     cf_handles_.clear();
     to_ingest_batch_.clear();
   }

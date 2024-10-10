@@ -178,6 +178,8 @@ bool RandomTransactionInserter::DoInsert(DB* db, Transaction* txn,
                   s.ToString().c_str());
           unexpected_error = true;
         }
+        // fprintf(stdout, "Transaction name: %s, Inserting key: %s, value: %s\n", txn->GetName().c_str(), key.ToString().c_str(), sum.c_str());
+        // fflush(stdout);
         s = txn->Put(key, sum);
         if (!s.ok()) {
           // Since we did a GetForUpdate, Put should not fail.
@@ -312,6 +314,7 @@ Status RandomTransactionInserter::Verify(DB* db, uint16_t num_sets,
   RandomShuffle(set_vec.begin(), set_vec.end());
 
   // For each set of keys with the same prefix, sum all the values
+  std::unordered_map<uint16_t, std::vector<std::pair<uint64_t, uint64_t>>> set_data;
   for (uint16_t set_i : set_vec) {
     // Five digits (since the largest uint16_t is 65535) plus the NUL
     // end char.
@@ -336,6 +339,9 @@ Status RandomTransactionInserter::Verify(DB* db, uint16_t num_sets,
         assert(s.ok());
         assert(!unexpected_error);
         total += int_value;
+        if (int_value) {
+        set_data[set_i].emplace_back(std::make_pair(k, int_value));
+        }
       }
     } else {  // user iterators
       Iterator* iter = db->NewIterator(roptions);
@@ -345,8 +351,14 @@ Status RandomTransactionInserter::Verify(DB* db, uint16_t num_sets,
         if (key.ToString().compare(0, 4, prefix_buf) != 0) {
           break;
         }
+        // Decode the key to extract the key number
+        Slice key_number_slice = key;
+        key_number_slice.remove_prefix(4);  // Remove the 4-digit prefix
+        uint64_t key_number = std::stoull(key_number_slice.ToString());
+
         Slice value = iter->value();
         uint64_t int_value = std::stoull(value.ToString());
+        set_data[set_i].emplace_back(std::make_pair(key_number, int_value));
         if (int_value == 0 || int_value == ULONG_MAX) {
           fprintf(stderr, "Iter returned unexpected value: %s\n",
                   value.ToString().c_str());
@@ -375,7 +387,18 @@ Status RandomTransactionInserter::Verify(DB* db, uint16_t num_sets,
               " at snapshot %" PRIu64 "\n",
               use_point_lookup, prev_i, prev_total, set_i, total,
               roptions.snapshot ? roptions.snapshot->GetSequenceNumber() : 0ul);
+      // Print the keys and values in the set
+      fprintf(stdout, "Contents of set_data:\n");
+      for (size_t i = 0; i < set_data.size(); i++) {
+        fprintf(stdout, "Set %zu:\n", i);
+        std::vector<std::pair<uint64_t, uint64_t>> sorted_set(set_data[i].begin(), set_data[i].end());
+        std::sort(sorted_set.begin(), sorted_set.end());
+        for (const auto& kv : sorted_set) {
+          fprintf(stdout, "  %" PRIu64 ": %" PRIu64 "\n", kv.first, kv.second);
+        }
+      }
       fflush(stdout);
+      std::terminate();
       return Status::Corruption();
     } else {
       ROCKS_LOG_DEBUG(
@@ -397,4 +420,3 @@ Status RandomTransactionInserter::Verify(DB* db, uint16_t num_sets,
 }
 
 }  // namespace ROCKSDB_NAMESPACE
-

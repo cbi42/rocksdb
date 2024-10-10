@@ -436,15 +436,43 @@ class FlushableWriteBatchWithIndexIterator : public InternalIterator {
     it_->SeekToLast();
     UpdateKey();
   }
+  // TODO: support duplicated keys, which is possible with Merge operations
+  // Move the iterator to the next user key
+  void NextKey() {
+    if (it_->Valid()) {
+      Slice cur_user_key = it_->Entry().key;
+      it_->Next();
+      while (it_->Valid() && comparator_->Compare(cur_user_key, it_->Entry().key) == 0) {
+        it_->Next();
+      }
+    }
+  }
+
+  void MoveToLastCurrentKey() {
+    if (it_->Valid()) {
+      NextKey();
+      if (it_->Valid()) {
+        it_->Prev();
+      } else {
+        it_->SeekToLast();
+      }
+    }
+  }
+
   void Seek(const Slice& target) override {
     it_->Seek(ExtractUserKey(target));
     if (it_->Valid()) {
       // compare seqno
       SequenceNumber seqno = GetInternalKeySeqno(target);
-      if (seqno < global_seqno_ && comparator_->Compare(it_->Entry().key, target) == 0) {
-        it_->Next();
+      if (seqno < global_seqno_ && comparator_->Compare(it_->Entry().key, ExtractUserKey(target)) == 0) {
+        NextKey();
+        // TODO: go to next key
+        // it_->Next();
       }
     }
+    // Move to last occurrence
+    MoveToLastCurrentKey();
+    // TODO: move to the last occurrence of this key
     UpdateKey();
   }
   void SeekForPrev(const Slice& target) override {
@@ -458,8 +486,29 @@ class FlushableWriteBatchWithIndexIterator : public InternalIterator {
     UpdateKey();
   }
   void Next() override {
+    // TODO: check that if we should move backward to get the next internal key
+    // By move back, and compare key
     assert(Valid());
-    it_->Next();
+    Slice cur_user_key = it_->Entry().key;
+    // First try go backwards
+    {
+      it_->Prev();
+      if (it_->Valid()) {
+        if (comparator_->Compare(it_->Entry().key, cur_user_key) == 0) {
+          UpdateKey();
+          return;
+        } else {
+          // restore position
+          it_->Next();
+        }
+      } else {
+        it_->SeekToFirst();
+      }
+    }
+
+    // it_->Next();
+    // Move to the first entry of the next user key
+    NextKey();
     UpdateKey();
   }
   bool NextAndGetResult(IterateResult* result) override {
@@ -505,6 +554,8 @@ class FlushableWriteBatchWithIndexIterator : public InternalIterator {
   const Comparator* comparator_;
   IterKey key_buf_;
   Slice key_;
+  //
+  std::vector<WriteEntry> current_entries_;
 };
 
 class FlushableWriteBatchWithIndex : public Flushable {
@@ -541,7 +592,7 @@ public:
   size_t ApproximateMemoryUsage() override ;
   void Ref() override {
     ++refs_;
-    fprintf(stdout, "Ref %d\n", refs_);
+    // fprintf(stdout, "Ref %d\n", refs_);
   };
   void MultiGet(const ReadOptions& , MultiGetRange* , ReadCallback* , bool ) override {};
   bool Get(const LookupKey& key, std::string* value,
@@ -603,7 +654,7 @@ public:
   }
   bool UnrefFlushable() override {
     --refs_;
-    fprintf(stdout, "Unref %d\n", refs_);
+    // fprintf(stdout, "Unref %d\n", refs_);
     assert(refs_ >= 0);
     return refs_ == 0;
   }

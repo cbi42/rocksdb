@@ -563,7 +563,9 @@ class DBImpl : public DB {
 
   Status IngestWBWI(std::vector<ColumnFamilyHandle*> column_family_handles,
     std::shared_ptr<WriteBatchWithIndex> wbwi,
-    uint64_t min_prep_log
+    uint64_t min_prep_log,
+    const std::string& txn_name,
+    bool from_write_thread
     // std::vector<Flushable*> flushables
     ) {
     InstrumentedMutexLock lock(&mutex_);
@@ -582,7 +584,9 @@ class DBImpl : public DB {
     // Enter write queue
     // Stop writes to the DB by entering both write threads
     WriteThread::Writer w;
-    write_thread_.EnterUnbatched(&w, &mutex_);
+    if (!from_write_thread) {
+      write_thread_.EnterUnbatched(&w, &mutex_);
+    }
     WriteThread::Writer nonmem_w;
     if (two_write_queues_) {
       nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
@@ -591,34 +595,42 @@ class DBImpl : public DB {
 
     Status s;
     fprintf(stdout, "IngestFlushable(): ");
+    const SequenceNumber last_seqno = versions_->LastSequence();
+    SequenceNumber consumed_seqno_count = 1;
     for (size_t i = 0; i < f.size() && s.ok(); ++i) {
       ColumnFamilyHandle* cf = column_family_handles[i];
     // for (auto cf : column_family_handles) {
       WriteContext write_context;
-      const SequenceNumber last_seqno = versions_->LastSequence();
-      SequenceNumber consumed_seqno_count = 1;
       if (!f[i]->SetGlobalSequenceNumber(last_seqno + consumed_seqno_count)) {
         s = Status::NotSupported("Cannot set global seqno");
         break;
       }
-      versions_->SetLastAllocatedSequence(last_seqno + consumed_seqno_count);
-      versions_->SetLastPublishedSequence(last_seqno + consumed_seqno_count);
-      versions_->SetLastSequence(last_seqno + consumed_seqno_count);
       // Get memtable option here
 
       s = SwitchMemtable(versions_->GetColumnFamilySet()->GetColumnFamily(cf->GetID()),
         &write_context, f[i]);
+      uint64_t memtable_id = f[i]->GetID();
       // SwitchMemtable
       // Since there's no write, we can ingest a new imm
       // Add a new imm Memtable
-      fprintf(stdout, "Cf: %s ", cf->GetName().c_str());
+      fprintf(stdout, "Cf: %s Txn %s, MemID %" PRIu64 ", seqno %" PRIu64 "\n",
+        cf->GetName().c_str(), txn_name.c_str(), memtable_id, last_seqno + consumed_seqno_count);
+      fflush(stdout);
+      // fprintf(stdout, "Cf: %s ", cf->GetName().c_str());
     }
+    // Nothing should changed seqno TODO: check this`
+    assert(versions_->LastSequence() == last_seqno);
+    versions_->SetLastAllocatedSequence(last_seqno + consumed_seqno_count);
+    versions_->SetLastPublishedSequence(last_seqno + consumed_seqno_count);
+    versions_->SetLastSequence(last_seqno + consumed_seqno_count);
     fprintf(stdout, "%d flushables\n", (int) f.size());
     // Resume writes to the DB
     if (two_write_queues_) {
       nonmem_write_thread_.ExitUnbatched(&nonmem_w);
     }
-    write_thread_.ExitUnbatched(&w);
+    if (!from_write_thread) {
+      write_thread_.ExitUnbatched(&w);
+    }
 
     if (s.ok()) {
       autovector<ColumnFamilyData*> cfds;
@@ -1616,7 +1628,11 @@ class DBImpl : public DB {
                    size_t batch_cnt = 0,
                    PreReleaseCallback* pre_release_callback = nullptr,
                    PostMemTableCallback* post_memtable_callback = nullptr,
-                   uint64_t reserve_seqno_count = 0);
+                   uint64_t reserve_seqno_count = 0,
+                   std::vector<ColumnFamilyHandle*> column_family_handles = {},
+    std::shared_ptr<WriteBatchWithIndex> wbwi = nullptr,
+    uint64_t min_prep_log = 0,
+    const std::string& txn_name = "");
 
   Status PipelinedWriteImpl(const WriteOptions& options, WriteBatch* updates,
                             WriteCallback* callback = nullptr,

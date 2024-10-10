@@ -523,8 +523,10 @@ size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
         // those are something else. They want to be alone
         (w->callback != nullptr && !w->callback->AllowWriteBatching()) ||
         // dont batch writes that don't want to be batched
-        (size + WriteBatchInternal::ByteSize(w->batch) > max_size)
+        (size + WriteBatchInternal::ByteSize(w->batch) > max_size) ||
         // Do not make batch too big
+        (leader->reserve_seqno_count > 0 || w->reserve_seqno_count > 0)
+        // ingesting WBWI needs to be its own group // TODO: maybe use a more informative flag
     ) {
       // remove from list
       w->link_older->link_newer = w->link_newer;

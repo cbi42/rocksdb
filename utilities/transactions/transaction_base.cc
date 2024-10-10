@@ -87,7 +87,7 @@ TransactionBaseImpl::~TransactionBaseImpl() {
 void TransactionBaseImpl::Clear() {
   save_points_.reset(nullptr);
   if (use_file_ingestion_) {
-    write_batch_.reset(new WriteBatchWithIndex());
+    write_batch_.reset(new WriteBatchWithIndex(cmp_, 0, true, 0, write_options_.protection_bytes_per_key));
   } else {
     write_batch_->Clear();
   }
