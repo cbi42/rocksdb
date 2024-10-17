@@ -3027,6 +3027,8 @@ class MemTableInserter : public WriteBatch::Handler {
           // all inserts must reference this trx log number
           log_number_ref_ = batch_info.log_number_;
           ResetProtectionInfo();
+          fprintf(stdout, "Replay Log Commit Txn %s, seqno %" PRIu64 "\n", name.ToString().c_str(), sequence_);
+          fflush(stdout);
           s = batch_info.batch_->Iterate(this);
           log_number_ref_ = 0;
         }

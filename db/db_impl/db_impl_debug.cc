@@ -259,7 +259,7 @@ size_t DBImpl::TEST_LogsWithPrepSize() {
 }
 
 uint64_t DBImpl::TEST_FindMinPrepLogReferencedByMemTable() {
-  autovector<MemTable*> empty_list;
+  autovector<ReadOnlyMemtable*> empty_list;
   return FindMinPrepLogReferencedByMemTable(versions_.get(), empty_list);
 }
 

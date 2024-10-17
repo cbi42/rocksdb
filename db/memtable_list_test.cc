@@ -98,7 +98,7 @@ class MemTableListTest : public testing::Test {
   // structures needed to call this function.
   Status Mock_InstallMemtableFlushResults(
       MemTableList* list, const MutableCFOptions& mutable_cf_options,
-      const autovector<MemTable*>& m, autovector<MemTable*>* to_delete) {
+      const autovector<ReadOnlyMemtable*>& m, autovector<ReadOnlyMemtable*>* to_delete) {
     // Create a mock Logger
     test::NullLogger logger;
     LogBuffer log_buffer(DEBUG_LEVEL, &logger);
@@ -148,8 +148,8 @@ class MemTableListTest : public testing::Test {
   Status Mock_InstallMemtableAtomicFlushResults(
       autovector<MemTableList*>& lists, const autovector<uint32_t>& cf_ids,
       const autovector<const MutableCFOptions*>& mutable_cf_options_list,
-      const autovector<const autovector<MemTable*>*>& mems_list,
-      autovector<MemTable*>* to_delete) {
+      const autovector<const autovector<ReadOnlyMemtable*>*>& mems_list,
+      autovector<ReadOnlyMemtable*>* to_delete) {
     // Create a mock Logger
     test::NullLogger logger;
     LogBuffer log_buffer(DEBUG_LEVEL, &logger);
@@ -227,12 +227,12 @@ TEST_F(MemTableListTest, Empty) {
   ASSERT_FALSE(list.imm_flush_needed.load(std::memory_order_acquire));
   ASSERT_FALSE(list.IsFlushPending());
 
-  autovector<MemTable*> mems;
+  autovector<ReadOnlyMemtable*> mems;
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &mems);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &mems);
   ASSERT_EQ(0, mems.size());
 
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
   list.current()->Unref(&to_delete);
   ASSERT_EQ(0, to_delete.size());
 }
@@ -252,7 +252,7 @@ TEST_F(MemTableListTest, GetTest) {
   MergeContext merge_context;
   InternalKeyComparator ikey_cmp(options.comparator);
   SequenceNumber max_covering_tombstone_seq = 0;
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
 
   LookupKey lkey("key1", seq);
   bool found = list.current()->Get(lkey, &value, /*columns=*/nullptr,
@@ -398,7 +398,7 @@ TEST_F(MemTableListTest, GetTest) {
   ASSERT_EQ(2, list.NumNotFlushed());
 
   list.current()->Unref(&to_delete);
-  for (MemTable* m : to_delete) {
+  for (auto* m : to_delete) {
     delete m;
   }
 }
@@ -418,7 +418,7 @@ TEST_F(MemTableListTest, GetFromHistoryTest) {
   MergeContext merge_context;
   InternalKeyComparator ikey_cmp(options.comparator);
   SequenceNumber max_covering_tombstone_seq = 0;
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
 
   LookupKey lkey("key1", seq);
   bool found = list.current()->Get(lkey, &value, /*columns=*/nullptr,
@@ -491,9 +491,9 @@ TEST_F(MemTableListTest, GetFromHistoryTest) {
 
   // Flush this memtable from the list.
   // (It will then be a part of the memtable history).
-  autovector<MemTable*> to_flush;
+  autovector<ReadOnlyMemtable*> to_flush;
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   ASSERT_EQ(1, to_flush.size());
 
   MutableCFOptions mutable_cf_options(options);
@@ -557,7 +557,7 @@ TEST_F(MemTableListTest, GetFromHistoryTest) {
 
   to_flush.clear();
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   ASSERT_EQ(1, to_flush.size());
 
   // Flush second memtable
@@ -636,7 +636,7 @@ TEST_F(MemTableListTest, GetFromHistoryTest) {
   // Cleanup
   list.current()->Unref(&to_delete);
   ASSERT_EQ(3, to_delete.size());
-  for (MemTable* m : to_delete) {
+  for (auto* m : to_delete) {
     delete m;
   }
 }
@@ -651,7 +651,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
   ImmutableOptions ioptions(options);
   InternalKeyComparator cmp(BytewiseComparator());
   WriteBufferManager wb(options.db_write_buffer_size);
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
 
   // Create MemTableList
   int min_write_buffer_number_to_merge = 3;
@@ -692,9 +692,9 @@ TEST_F(MemTableListTest, FlushPendingTest) {
   // Nothing to flush
   ASSERT_FALSE(list.IsFlushPending());
   ASSERT_FALSE(list.imm_flush_needed.load(std::memory_order_acquire));
-  autovector<MemTable*> to_flush;
+  autovector<ReadOnlyMemtable*> to_flush;
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   ASSERT_EQ(0, to_flush.size());
 
   // Request a flush even though there is nothing to flush
@@ -704,7 +704,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
 
   // Attempt to 'flush' to clear request for flush
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   ASSERT_EQ(0, to_flush.size());
   ASSERT_FALSE(list.IsFlushPending());
   ASSERT_FALSE(list.imm_flush_needed.load(std::memory_order_acquire));
@@ -729,7 +729,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
 
   // Pick tables to flush
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   ASSERT_EQ(2, to_flush.size());
   ASSERT_EQ(2, list.NumNotFlushed());
   ASSERT_FALSE(list.IsFlushPending());
@@ -751,16 +751,16 @@ TEST_F(MemTableListTest, FlushPendingTest) {
 
   // Pick tables to flush
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   ASSERT_EQ(3, to_flush.size());
   ASSERT_EQ(3, list.NumNotFlushed());
   ASSERT_FALSE(list.IsFlushPending());
   ASSERT_FALSE(list.imm_flush_needed.load(std::memory_order_acquire));
 
   // Pick tables to flush again
-  autovector<MemTable*> to_flush2;
+  autovector<ReadOnlyMemtable*> to_flush2;
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush2);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush2);
   ASSERT_EQ(0, to_flush2.size());
   ASSERT_EQ(3, list.NumNotFlushed());
   ASSERT_FALSE(list.IsFlushPending());
@@ -779,7 +779,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
 
   // Pick tables to flush again
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush2);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush2);
   ASSERT_EQ(1, to_flush2.size());
   ASSERT_EQ(4, list.NumNotFlushed());
   ASSERT_FALSE(list.IsFlushPending());
@@ -801,7 +801,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
 
   // Pick tables to flush
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush);
   // Picks three oldest memtables. The fourth oldest is picked in `to_flush2` so
   // must be excluded. The newest (fifth oldest) is non-consecutive with the
   // three oldest due to omitting the fourth oldest so must not be picked.
@@ -811,9 +811,9 @@ TEST_F(MemTableListTest, FlushPendingTest) {
   ASSERT_TRUE(list.imm_flush_needed.load(std::memory_order_acquire));
 
   // Pick tables to flush again
-  autovector<MemTable*> to_flush3;
+  autovector<ReadOnlyMemtable*> to_flush3;
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush3);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush3);
   // Picks newest (fifth oldest)
   ASSERT_EQ(1, to_flush3.size());
   ASSERT_EQ(5, list.NumNotFlushed());
@@ -821,9 +821,9 @@ TEST_F(MemTableListTest, FlushPendingTest) {
   ASSERT_FALSE(list.imm_flush_needed.load(std::memory_order_acquire));
 
   // Nothing left to flush
-  autovector<MemTable*> to_flush4;
+  autovector<ReadOnlyMemtable*> to_flush4;
   list.PickMemtablesToFlush(
-      std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush4);
+    std::numeric_limits<uint64_t>::max() /* memtable_id */, &to_flush4);
   ASSERT_EQ(0, to_flush4.size());
   ASSERT_EQ(5, list.NumNotFlushed());
   ASSERT_FALSE(list.IsFlushPending());
@@ -879,7 +879,8 @@ TEST_F(MemTableListTest, FlushPendingTest) {
     // Refcount should be 0 after calling TryInstallMemtableFlushResults.
     // Verify this, by Ref'ing then UnRef'ing:
     m->Ref();
-    ASSERT_EQ(m, m->Unref());
+    ASSERT_TRUE(m->UnrefFlushable());
+    // ASSERT_EQ(m, m->UnrefF());
     delete m;
   }
   to_delete.clear();
@@ -891,7 +892,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
   memtable_id = 4;
   // Pick tables to flush. The tables to pick must have ID smaller than or
   // equal to 4. Therefore, no table will be selected in this case.
-  autovector<MemTable*> to_flush5;
+  autovector<ReadOnlyMemtable*> to_flush5;
   list.FlushRequested();
   ASSERT_TRUE(list.HasFlushRequested());
   list.PickMemtablesToFlush(memtable_id, &to_flush5);
@@ -922,7 +923,8 @@ TEST_F(MemTableListTest, FlushPendingTest) {
     // Refcount should be 0 after calling TryInstallMemtableFlushResults.
     // Verify this, by Ref'ing then UnRef'ing:
     m->Ref();
-    ASSERT_EQ(m, m->Unref());
+    // ASSERT_EQ(m, m->Unref());
+    ASSERT_TRUE(m->UnrefFlushable());
     delete m;
   }
   to_delete.clear();
@@ -932,8 +934,8 @@ TEST_F(MemTableListTest, EmptyAtomicFlushTest) {
   autovector<MemTableList*> lists;
   autovector<uint32_t> cf_ids;
   autovector<const MutableCFOptions*> options_list;
-  autovector<const autovector<MemTable*>*> to_flush;
-  autovector<MemTable*> to_delete;
+  autovector<const autovector<ReadOnlyMemtable*>*> to_flush;
+  autovector<ReadOnlyMemtable*> to_delete;
   Status s = Mock_InstallMemtableAtomicFlushResults(lists, cf_ids, options_list,
                                                     to_flush, &to_delete);
   ASSERT_OK(s);
@@ -995,7 +997,7 @@ TEST_F(MemTableListTest, AtomicFlushTest) {
     cf_ids.push_back(cf_id++);
   }
 
-  std::vector<autovector<MemTable*>> flush_candidates(num_cfs);
+  std::vector<autovector<ReadOnlyMemtable*>> flush_candidates(num_cfs);
 
   // Nothing to flush
   for (auto i = 0; i != num_cfs; ++i) {
@@ -1003,8 +1005,8 @@ TEST_F(MemTableListTest, AtomicFlushTest) {
     ASSERT_FALSE(list->IsFlushPending());
     ASSERT_FALSE(list->imm_flush_needed.load(std::memory_order_acquire));
     list->PickMemtablesToFlush(
-        std::numeric_limits<uint64_t>::max() /* memtable_id */,
-        &flush_candidates[i]);
+      std::numeric_limits<uint64_t>::max() /* memtable_id */,
+      &flush_candidates[i]);
     ASSERT_EQ(0, flush_candidates[i].size());
   }
   // Request flush even though there is nothing to flush
@@ -1014,7 +1016,7 @@ TEST_F(MemTableListTest, AtomicFlushTest) {
     ASSERT_FALSE(list->IsFlushPending());
     ASSERT_FALSE(list->imm_flush_needed.load(std::memory_order_acquire));
   }
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
   // Add tables to the immutable memtalbe lists associated with column families
   for (auto i = 0; i != num_cfs; ++i) {
     for (auto j = 0; j != num_tables_per_cf; ++j) {
@@ -1041,7 +1043,7 @@ TEST_F(MemTableListTest, AtomicFlushTest) {
   autovector<MemTableList*> tmp_lists;
   autovector<uint32_t> tmp_cf_ids;
   autovector<const MutableCFOptions*> tmp_options_list;
-  autovector<const autovector<MemTable*>*> to_flush;
+  autovector<const autovector<ReadOnlyMemtable*>*> to_flush;
   for (auto i = 0; i != num_cfs; ++i) {
     if (!flush_candidates[i].empty()) {
       to_flush.push_back(&flush_candidates[i]);
@@ -1083,7 +1085,8 @@ TEST_F(MemTableListTest, AtomicFlushTest) {
     // Refcount should be 0 after calling InstallMemtableFlushResults.
     // Verify this by Ref'ing and then Unref'ing.
     m->Ref();
-    ASSERT_EQ(m, m->Unref());
+    // ASSERT_EQ(m, m->Unref());
+    ASSERT_TRUE(m->UnrefFlushable());
     delete m;
   }
 }
@@ -1122,7 +1125,7 @@ TEST_F(MemTableListWithTimestampTest, GetTableNewestUDT) {
   std::vector<MemTable*> tables;
   MutableCFOptions mutable_cf_options(options);
   uint64_t current_ts = 0;
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
   std::vector<std::string> newest_udts;
 
   std::string key;
@@ -1162,7 +1165,7 @@ TEST_F(MemTableListWithTimestampTest, GetTableNewestUDT) {
   }
 
   list.current()->Unref(&to_delete);
-  for (MemTable* m : to_delete) {
+  for (auto* m : to_delete) {
     delete m;
   }
   to_delete.clear();

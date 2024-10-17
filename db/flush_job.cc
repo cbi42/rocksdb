@@ -157,7 +157,7 @@ void FlushJob::ReportStartedFlush() {
   IOSTATS_RESET(bytes_written);
 }
 
-void FlushJob::ReportFlushInputSize(const autovector<MemTable*>& mems) {
+void FlushJob::ReportFlushInputSize(const autovector<ReadOnlyMemtable*>& mems) {
   uint64_t input_size = 0;
   for (auto* mem : mems) {
     input_size += mem->ApproximateMemoryUsage();
@@ -204,7 +204,7 @@ void FlushJob::PickMemTable() {
   // entries mems are (implicitly) sorted in ascending order by their created
   // time. We will use the first memtable's `edit` to keep the meta info for
   // this flush.
-  MemTable* m = mems_[0];
+  ReadOnlyMemtable* m = mems_[0];
   edit_ = m->GetEdits();
   edit_->SetPrevLogNumber(0);
   // SetLogNumber(log_num) indicates logs with number smaller than log_num
@@ -420,7 +420,7 @@ Status FlushJob::MemPurge() {
   std::vector<InternalIterator*> memtables;
   std::vector<std::unique_ptr<FragmentedRangeTombstoneIterator>>
       range_del_iters;
-  for (MemTable* m : mems_) {
+  for (auto* m : mems_) {
     memtables.push_back(
         m->NewIterator(ro, /*seqno_to_time_mapping=*/nullptr, &arena));
     auto* range_del_iter = m->NewRangeTombstoneIterator(
@@ -714,7 +714,7 @@ bool FlushJob::MemPurgeDecider(double threshold) {
   // Iterate over each memtable of the set.
   for (auto mem_iter = std::begin(mems_); mem_iter != std::end(mems_);
        mem_iter++) {
-    MemTable* mt = *mem_iter;
+    auto* mt = *mem_iter;
 
     // Else sample from the table.
     uint64_t nentries = mt->num_entries();
@@ -888,11 +888,11 @@ Status FlushJob::WriteLevel0Table() {
     TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:num_memtables",
                              &mems_size);
     assert(job_context_);
-    for (MemTable* m : mems_) {
+    for (auto* m : mems_) {
       ROCKS_LOG_INFO(
           db_options_.info_log,
-          "[%s] [JOB %d] Flushing memtable with next log file: %" PRIu64 "\n",
-          cfd_->GetName().c_str(), job_context_->job_id, m->GetNextLogNumber());
+          "[%s] [JOB %d] Flushing memtable id %" PRIu64 " with next log file: %" PRIu64 "\n",
+          cfd_->GetName().c_str(), job_context_->job_id, m->GetID(), m->GetNextLogNumber());
       memtables.push_back(
           m->NewIterator(ro, /*seqno_to_time_mapping=*/nullptr, &arena));
       auto* range_del_iter = m->NewRangeTombstoneIterator(
@@ -1154,7 +1154,7 @@ void FlushJob::GetEffectiveCutoffUDTForPickedMemTables() {
     return;
   }
   // Find the newest user-defined timestamps from all the flushed memtables.
-  for (MemTable* m : mems_) {
+  for (auto* m : mems_) {
     Slice table_newest_udt = m->GetNewestUDT();
     // Empty memtables can be legitimately created and flushed, for example
     // by error recovery flush attempts.

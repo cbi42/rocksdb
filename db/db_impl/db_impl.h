@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <rocksdb/utilities/write_batch_with_index.h>
 
 #include "db/column_family.h"
 #include "db/compaction/compaction_iterator.h"
@@ -1500,6 +1501,19 @@ class DBImpl : public DB {
 
   void EraseThreadStatusDbInfo() const;
 
+  // For CFs that `wbwi` operates on, their memtable will be switched,
+  // and `wbwi` will be added as the latest immutable memtable.
+  //
+  // REQUIRES: this thread is currently at the front of the writer queue.
+  // @param min_prep_log refers to the WAL that contains prepare record
+  // for the transaction based on wbwi.
+  // @param assigned_seqno Sequence number for the ingested memtable.
+  // @param last_seqno The latest sequence number after this WBWI is
+ Status IngestWBWI(std::shared_ptr<WriteBatchWithIndex> wbwi,
+   SequenceNumber assigned_seqno, uint64_t min_prep_log,
+   const std::string& txn_name, bool from_write_thread,
+   SequenceNumber last_seqno);
+
   // If disable_memtable is set the application logic must guarantee that the
   // batch will still be skipped from memtable during the recovery. An excption
   // to this is seq_per_batch_ mode, in which since each batch already takes one
@@ -1522,7 +1536,10 @@ class DBImpl : public DB {
                    bool disable_memtable = false, uint64_t* seq_used = nullptr,
                    size_t batch_cnt = 0,
                    PreReleaseCallback* pre_release_callback = nullptr,
-                   PostMemTableCallback* post_memtable_callback = nullptr);
+                   PostMemTableCallback* post_memtable_callback = nullptr,
+    std::shared_ptr<WriteBatchWithIndex> wbwi = nullptr,
+    uint64_t min_prep_log = 0,
+    const std::string& txn_name = ""); // TODO: txn_name is for DEBUG only
 
   Status PipelinedWriteImpl(const WriteOptions& options, WriteBatch* updates,
                             WriteCallback* callback = nullptr,
@@ -1693,7 +1710,7 @@ class DBImpl : public DB {
 
   struct WriteContext {
     SuperVersionContext superversion_context;
-    autovector<MemTable*> memtables_to_free_;
+    autovector<ReadOnlyMemtable*> memtables_to_free_;
 
     explicit WriteContext(bool create_superversion = false)
         : superversion_context(create_superversion) {}
@@ -2028,7 +2045,11 @@ class DBImpl : public DB {
 
   Status TrimMemtableHistory(WriteContext* context);
 
-  Status SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context);
+  // Switches the current live memtable to immutable memtable.
+  // If new_imm is provided, it will be added as the newest immutable memtable.
+  Status SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
+    ReadOnlyMemtable* new_imm = nullptr,
+    SequenceNumber last_seqno = 0);
 
   // Select and output column families qualified for atomic flush in
   // `selected_cfds`. If `provided_candidate_cfds` is non-empty, it will be used
@@ -2969,7 +2990,7 @@ CompressionType GetCompressionFlush(const ImmutableCFOptions& ioptions,
 VersionEdit GetDBRecoveryEditForObsoletingMemTables(
     VersionSet* vset, const ColumnFamilyData& cfd,
     const autovector<VersionEdit*>& edit_list,
-    const autovector<MemTable*>& memtables, LogsWithPrepTracker* prep_tracker);
+    const autovector<ReadOnlyMemtable*>& memtables, LogsWithPrepTracker* prep_tracker);
 
 // Return the earliest log file to keep after the memtable flush is
 // finalized.
@@ -2980,13 +3001,13 @@ VersionEdit GetDBRecoveryEditForObsoletingMemTables(
 uint64_t PrecomputeMinLogNumberToKeep2PC(
     VersionSet* vset, const ColumnFamilyData& cfd_to_flush,
     const autovector<VersionEdit*>& edit_list,
-    const autovector<MemTable*>& memtables_to_flush,
+    const autovector<ReadOnlyMemtable*>& memtables_to_flush,
     LogsWithPrepTracker* prep_tracker);
 // For atomic flush.
 uint64_t PrecomputeMinLogNumberToKeep2PC(
     VersionSet* vset, const autovector<ColumnFamilyData*>& cfds_to_flush,
     const autovector<autovector<VersionEdit*>>& edit_lists,
-    const autovector<const autovector<MemTable*>*>& memtables_to_flush,
+    const autovector<const autovector<ReadOnlyMemtable*>*>& memtables_to_flush,
     LogsWithPrepTracker* prep_tracker);
 
 // In non-2PC mode, WALs with log number < the returned number can be
@@ -3003,11 +3024,11 @@ uint64_t PrecomputeMinLogNumberToKeepNon2PC(
 // will not depend on any WAL file. nullptr means no memtable is being flushed.
 // The function is only applicable to 2pc mode.
 uint64_t FindMinPrepLogReferencedByMemTable(
-    VersionSet* vset, const autovector<MemTable*>& memtables_to_flush);
+    VersionSet* vset, const autovector<ReadOnlyMemtable*>& memtables_to_flush);
 // For atomic flush.
 uint64_t FindMinPrepLogReferencedByMemTable(
     VersionSet* vset,
-    const autovector<const autovector<MemTable*>*>& memtables_to_flush);
+    const autovector<const autovector<ReadOnlyMemtable*>*>& memtables_to_flush);
 
 // Fix user-supplied options to be reasonable
 template <class T, class V>

@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <db/memtable.h>
 
 #include "rocksdb/comparator.h"
 #include "rocksdb/iterator.h"
@@ -41,6 +42,18 @@ enum WriteType {
   kXIDRecord,
   kPutEntityRecord,
   kUnknownRecord,
+};
+
+const std::map<WriteType, ValueType> WriteTypeToValueTypeMap = {
+  {kPutRecord, kTypeValue},
+  {kMergeRecord, kTypeMerge},
+  {kDeleteRecord, kTypeDeletion},
+  {kSingleDeleteRecord, kTypeSingleDeletion},
+  {kDeleteRangeRecord, kTypeRangeDeletion},
+  // {kLogDataRecord, kTypeLogData},
+  // {kXIDRecord, kTypeBeginPrepareXID},
+  {kPutEntityRecord, kTypeWideColumnEntity},
+  // {kUnknownRecord, kTypeNoop}
 };
 
 // An entry for Put, PutEntity, Merge, Delete, or SingleDelete for write
@@ -193,6 +206,7 @@ class WriteBatchWithIndex : public WriteBatchBase {
   //
   // The returned iterator should be deleted by the caller.
   WBWIIterator* NewIterator(ColumnFamilyHandle* column_family);
+  WBWIIterator* NewIterator(uint32_t cf_id) const;
   // Create an iterator of the default column family.
   WBWIIterator* NewIterator();
 
@@ -347,6 +361,11 @@ class WriteBatchWithIndex : public WriteBatchBase {
 
   void SetMaxBytes(size_t max_bytes) override;
   size_t GetDataSize() const;
+
+  const std::unordered_map<uint32_t, uint32_t>& GetColumnFamilyIDs() const;
+
+  // TODO: maybe check merge and other not supported operations?
+  bool HasDuplicateKeys() const;
 
  private:
   friend class PessimisticTransactionDB;

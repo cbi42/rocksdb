@@ -268,7 +268,7 @@ struct SuperVersion {
   // We need to_delete because during Cleanup(), imm->Unref() returns
   // all memtables that we need to free through this vector. We then
   // delete all those memtables outside of mutex, during destruction
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
 };
 
 Status CheckCompressionSupported(const ColumnFamilyOptions& cf_options);
@@ -389,6 +389,11 @@ class ColumnFamilyData {
     uint64_t memtable_id = last_memtable_id_.fetch_add(1) + 1;
     new_mem->SetID(memtable_id);
     mem_ = new_mem;
+  }
+
+  void AssignMemtableID(ReadOnlyMemtable* new_imm) {
+    uint64_t memtable_id = last_memtable_id_.fetch_add(1) + 1;
+    new_imm->SetID(memtable_id);
   }
 
   // calculate the oldest log needed for the durability of this column family

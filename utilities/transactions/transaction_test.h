@@ -52,13 +52,14 @@ class TransactionTestBase : public ::testing::Test {
 
   TransactionTestBase(bool use_stackable_db, bool two_write_queue,
                       TxnDBWritePolicy write_policy,
-                      WriteOrdering write_ordering)
+                      WriteOrdering write_ordering,
+                      int max_write_buffer = 8) // TODO: change to 2
       : db(nullptr),
         special_env(Env::Default()),
         env(nullptr),
         use_stackable_db_(use_stackable_db) {
     options.create_if_missing = true;
-    options.max_write_buffer_number = 2;
+    options.max_write_buffer_number = max_write_buffer;
     options.write_buffer_size = 4 * 1024;
     options.unordered_write = write_ordering == kUnorderedWrite;
     options.level0_file_num_compaction_trigger = 2;

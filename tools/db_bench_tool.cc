@@ -5155,6 +5155,12 @@ class Benchmark {
     WriteBatch batch(/*reserved_bytes=*/0, /*max_bytes=*/0,
                      FLAGS_write_batch_protection_bytes_per_key,
                      user_timestamp_size_);
+    TransactionDB* tdb = static_cast<TransactionDB*>(db_.db);
+    Transaction* txn = nullptr;
+    TransactionOptions topts;
+    if (FLAGS_transaction_db) {
+      txn = tdb->BeginTransaction(write_options_, topts);
+    }
     Status s;
     int64_t bytes = 0;
 
@@ -5257,7 +5263,9 @@ class Benchmark {
     size_t id = 0;
     int64_t num_range_deletions = 0;
 
+    int txn_id = 0;
     while ((num_per_key_gen != 0) && !duration.Done(entries_per_batch_)) {
+      ++txn_id;
       if (duration.GetStage() != stage) {
         stage = duration.GetStage();
         if (db_.db != nullptr) {
@@ -5289,6 +5297,7 @@ class Benchmark {
       DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(id);
 
       batch.Clear();
+      txn = tdb->BeginTransaction(write_options_, topts, txn);
       int64_t batch_bytes = 0;
 
       for (int64_t j = 0; j < entries_per_batch_; j++) {
@@ -5415,7 +5424,8 @@ class Benchmark {
             s = blobdb->Put(write_options_, key, val);
           }
         } else if (FLAGS_num_column_families <= 1) {
-          batch.Put(key, val);
+          // batch.Put(key, val);
+          txn->Put(key, val);
         } else {
           // We use same rand_num as seed for key and column family so that we
           // can deterministically find the cfh corresponding to a particular
@@ -5507,7 +5517,23 @@ class Benchmark {
       }
       if (!use_blob_db_) {
         // Not stacked BlobDB
-        s = db_with_cfh->db->Write(write_options_, &batch);
+        if (FLAGS_transaction_db) {
+          txn->SetName(std::to_string(txn_id));
+          s = txn->Prepare();
+          if (!s.ok()) {
+            fprintf(stderr, "status %s\n", s.ToString().c_str());
+            std::exit(5);
+          }
+          assert(s.ok());
+          s = txn->Commit();
+          assert(s.ok());
+          if (!s.ok()) {
+            fprintf(stderr, "status %s\n", s.ToString().c_str());
+            std::exit(5);
+          }
+        } else {
+          s = db_with_cfh->db->Write(write_options_, &batch);
+        }
       }
       thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db,
                                 entries_per_batch_, kWrite);

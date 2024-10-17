@@ -65,7 +65,8 @@ TransactionBaseImpl::TransactionBaseImpl(
       cmp_(GetColumnFamilyUserComparator(db->DefaultColumnFamily())),
       lock_tracker_factory_(lock_tracker_factory),
       start_time_(dbimpl_->GetSystemClock()->NowMicros()),
-      write_batch_(cmp_, 0, true, 0, write_options.protection_bytes_per_key),
+      write_batch_(std::make_shared<WriteBatchWithIndex>(cmp_, 0, true, 0,
+        write_options.protection_bytes_per_key)),
       tracked_locks_(lock_tracker_factory_.Create()),
       commit_time_batch_(0 /* reserved_bytes */, 0 /* max_bytes */,
                          write_options.protection_bytes_per_key,
@@ -85,7 +86,11 @@ TransactionBaseImpl::~TransactionBaseImpl() {
 
 void TransactionBaseImpl::Clear() {
   save_points_.reset(nullptr);
-  write_batch_.Clear();
+  if (ingest_transaction_) {
+    write_batch_.reset(new WriteBatchWithIndex(cmp_, 0, true, 0, write_options_.protection_bytes_per_key));
+  } else {
+    write_batch_->Clear();
+  }
   commit_time_batch_.Clear();
   tracked_locks_->Clear();
   num_puts_ = 0;
@@ -111,9 +116,9 @@ void TransactionBaseImpl::Reinitialize(DB* db,
   indexing_enabled_ = true;
   cmp_ = GetColumnFamilyUserComparator(db_->DefaultColumnFamily());
   WriteBatchInternal::SetDefaultColumnFamilyTimestampSize(
-      write_batch_.GetWriteBatch(), cmp_->timestamp_size());
+      write_batch_->GetWriteBatch(), cmp_->timestamp_size());
   WriteBatchInternal::UpdateProtectionInfo(
-      write_batch_.GetWriteBatch(), write_options_.protection_bytes_per_key)
+      write_batch_->GetWriteBatch(), write_options_.protection_bytes_per_key)
       .PermitUncheckedError();
   WriteBatchInternal::UpdateProtectionInfo(
       &commit_time_batch_, write_options_.protection_bytes_per_key)
@@ -179,7 +184,7 @@ void TransactionBaseImpl::SetSavePoint() {
   save_points_->emplace(snapshot_, snapshot_needed_, snapshot_notifier_,
                         num_puts_, num_put_entities_, num_deletes_, num_merges_,
                         lock_tracker_factory_);
-  write_batch_.SetSavePoint();
+  write_batch_->SetSavePoint();
 }
 
 Status TransactionBaseImpl::RollbackToSavePoint() {
@@ -195,7 +200,7 @@ Status TransactionBaseImpl::RollbackToSavePoint() {
     num_merges_ = save_point.num_merges_;
 
     // Rollback batch
-    Status s = write_batch_.RollbackToSavePoint();
+    Status s = write_batch_->RollbackToSavePoint();
     assert(s.ok());
 
     // Rollback any keys that were tracked since the last savepoint
@@ -205,7 +210,7 @@ Status TransactionBaseImpl::RollbackToSavePoint() {
 
     return s;
   } else {
-    assert(write_batch_.RollbackToSavePoint().IsNotFound());
+    assert(write_batch_->RollbackToSavePoint().IsNotFound());
     return Status::NotFound();
   }
 }
@@ -213,7 +218,7 @@ Status TransactionBaseImpl::RollbackToSavePoint() {
 Status TransactionBaseImpl::PopSavePoint() {
   if (save_points_ == nullptr || save_points_->empty()) {
     // No SavePoint yet.
-    assert(write_batch_.PopSavePoint().IsNotFound());
+    assert(write_batch_->PopSavePoint().IsNotFound());
     return Status::NotFound();
   }
 
@@ -232,7 +237,7 @@ Status TransactionBaseImpl::PopSavePoint() {
     save_points_->top().new_locks_->Merge(*top.new_locks_);
   }
 
-  return write_batch_.PopSavePoint();
+  return write_batch_->PopSavePoint();
 }
 
 Status TransactionBaseImpl::Get(const ReadOptions& _read_options,
@@ -285,7 +290,7 @@ Status TransactionBaseImpl::GetImpl(const ReadOptions& read_options,
                                     ColumnFamilyHandle* column_family,
                                     const Slice& key,
                                     PinnableSlice* pinnable_val) {
-  return write_batch_.GetFromBatchAndDB(db_, read_options, column_family, key,
+  return write_batch_->GetFromBatchAndDB(db_, read_options, column_family, key,
                                         pinnable_val);
 }
 
@@ -421,7 +426,7 @@ void TransactionBaseImpl::MultiGet(const ReadOptions& _read_options,
   if (read_options.io_activity == Env::IOActivity::kUnknown) {
     read_options.io_activity = Env::IOActivity::kMultiGet;
   }
-  write_batch_.MultiGetFromBatchAndDB(db_, read_options, column_family,
+  write_batch_->MultiGetFromBatchAndDB(db_, read_options, column_family,
                                       num_keys, keys, values, statuses,
                                       sorted_input);
 }
@@ -473,7 +478,7 @@ Iterator* TransactionBaseImpl::GetIterator(const ReadOptions& read_options) {
   Iterator* db_iter = db_->NewIterator(read_options);
   assert(db_iter);
 
-  return write_batch_.NewIteratorWithBase(db_->DefaultColumnFamily(), db_iter,
+  return write_batch_->NewIteratorWithBase(db_->DefaultColumnFamily(), db_iter,
                                           &read_options);
 }
 
@@ -482,7 +487,7 @@ Iterator* TransactionBaseImpl::GetIterator(const ReadOptions& read_options,
   Iterator* db_iter = db_->NewIterator(read_options, column_family);
   assert(db_iter);
 
-  return write_batch_.NewIteratorWithBase(column_family, db_iter,
+  return write_batch_->NewIteratorWithBase(column_family, db_iter,
                                           &read_options);
 }
 
@@ -724,13 +729,13 @@ Status TransactionBaseImpl::SingleDeleteUntracked(
 }
 
 void TransactionBaseImpl::PutLogData(const Slice& blob) {
-  auto s = write_batch_.PutLogData(blob);
+  auto s = write_batch_->PutLogData(blob);
   (void)s;
   assert(s.ok());
 }
 
 WriteBatchWithIndex* TransactionBaseImpl::GetWriteBatch() {
-  return &write_batch_;
+  return write_batch_.get();
 }
 
 uint64_t TransactionBaseImpl::GetElapsedTime() const {
@@ -778,10 +783,10 @@ void TransactionBaseImpl::TrackKey(uint32_t cfh_id, const std::string& key,
 WriteBatchBase* TransactionBaseImpl::GetBatchForWrite() {
   if (indexing_enabled_) {
     // Use WriteBatchWithIndex
-    return &write_batch_;
+    return write_batch_.get();
   } else {
     // Don't use WriteBatchWithIndex. Return base WriteBatch.
-    return write_batch_.GetWriteBatch();
+    return write_batch_->GetWriteBatch();
   }
 }
 

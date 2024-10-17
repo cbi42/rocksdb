@@ -1365,6 +1365,9 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& wal_numbers,
       }
     }
 
+    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                       "Point in time recovered to log #%" PRIu64
+                       " seq #%" PRIu64, wal_number, *next_sequence);
     if (!status.ok() || old_log_record) {
       if (status.IsNotSupported()) {
         // We should not treat NotSupported as corruption. It is rather a clear

@@ -72,8 +72,8 @@ void PessimisticTransaction::Initialize(const TransactionOptions& txn_options) {
 
   deadlock_detect_ = txn_options.deadlock_detect;
   deadlock_detect_depth_ = txn_options.deadlock_detect_depth;
-  write_batch_.SetMaxBytes(txn_options.max_write_batch_size);
-  write_batch_.GetWriteBatch()->SetTrackTimestampSize(
+  write_batch_->SetMaxBytes(txn_options.max_write_batch_size);
+  write_batch_->GetWriteBatch()->SetTrackTimestampSize(
       txn_options.write_batch_track_timestamp_size);
   skip_concurrency_control_ = txn_options.skip_concurrency_control;
 
@@ -103,6 +103,7 @@ void PessimisticTransaction::Initialize(const TransactionOptions& txn_options) {
 
   read_timestamp_ = kMaxTxnTimestamp;
   commit_timestamp_ = kMaxTxnTimestamp;
+  ingest_transaction_ = txn_options.ingest_transaction;
 }
 
 PessimisticTransaction::~PessimisticTransaction() {
@@ -838,11 +839,19 @@ Status WriteCommittedTxn::CommitInternal() {
   // We take the commit-time batch and append the Commit marker.
   // The Memtable will ignore the Commit marker in non-recovery mode
   WriteBatch* working_batch = GetCommitTimeWriteBatch();
-
   Status s;
+  fprintf(stdout, "Committing Txn %s\n", GetName().c_str());
+  if (ingest_transaction_) {
+    fprintf(stdout, "Transaction %s to ingest writeBatch directly,"
+                    "has_delete:%d, count: %d\n", GetName().c_str(),
+                    GetWriteBatch()->GetWriteBatch()->HasDelete(),
+                    GetWriteBatch()->GetWriteBatch()->Count());
+  }
+  const bool ingest_wbwi = ingest_transaction_ && GetWriteBatch()->GetWriteBatch()->Count() > 0;
   if (!needs_ts) {
     s = WriteBatchInternal::MarkCommit(working_batch, name_);
   } else {
+    assert(!ingest_wbwi);
     assert(commit_timestamp_ != kMaxTxnTimestamp);
     char commit_ts_buf[sizeof(kMaxTxnTimestamp)];
     EncodeFixed64(commit_ts_buf, commit_timestamp_);
@@ -878,11 +887,13 @@ Status WriteCommittedTxn::CommitInternal() {
   // any operations appended to this working_batch will be ignored from WAL
   working_batch->MarkWalTerminationPoint();
 
-  // insert prepared batch into Memtable only skipping WAL.
-  // Memtable will ignore BeginPrepare/EndPrepare markers
-  // in non recovery mode and simply insert the values
-  s = WriteBatchInternal::Append(working_batch, wb);
-  assert(s.ok());
+  if (!ingest_wbwi) {
+    // insert prepared batch into Memtable only skipping WAL.
+    // Memtable will ignore BeginPrepare/EndPrepare markers
+    // in non recovery mode and simply insert the values
+    s = WriteBatchInternal::Append(working_batch, wb);
+    assert(s.ok());
+  }
 
   uint64_t seq_used = kMaxSequenceNumber;
   SnapshotCreationCallback snapshot_creation_cb(db_impl_, commit_timestamp_,
@@ -896,12 +907,15 @@ Status WriteCommittedTxn::CommitInternal() {
       post_mem_cb = &snapshot_creation_cb;
     }
   }
+  assert(log_number_ > 0);
   s = db_impl_->WriteImpl(write_options_, working_batch, /*callback*/ nullptr,
                           /*user_write_cb=*/nullptr,
                           /*log_used*/ nullptr, /*log_ref*/ log_number_,
                           /*disable_memtable*/ false, &seq_used,
                           /*batch_cnt=*/0, /*pre_release_callback=*/nullptr,
-                          post_mem_cb);
+                          post_mem_cb,
+                          ingest_wbwi? write_batch_ : nullptr, log_number_, name_);
+  // TODO: what is seq used, what seq to assign?
   assert(!s.ok() || seq_used != kMaxSequenceNumber);
   if (s.ok()) {
     SetId(seq_used);
@@ -1142,7 +1156,15 @@ Status PessimisticTransaction::TryLock(ColumnFamilyHandle* column_family,
       // Failed to validate key
       // Unlock key we just locked
       if (lock_upgrade) {
-        s = txn_db_impl_->TryLock(this, cfh_id, key_str, false /* exclusive */);
+        s = txn_db_impl_->TryLock(
+            this, cfh_id, key_str,
+            false /* exclusive */);  // is this status overwriting correct? //
+                                     // Why do we need to downgrade the lock to
+                                     // shared?
+        // seems like a bug to overwrite status, what's the implication?
+        // a lock upgrade fails, but ok is returned. Only shared lock is held
+        // somehow. Is it possible that validate snapshot would fail if we need
+        // to upgrade lock here? we should already have acquired shared lock.
         assert(s.ok());
       } else if (!previously_locked) {
         txn_db_impl_->UnLock(this, cfh_id, key.ToString());

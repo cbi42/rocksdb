@@ -48,6 +48,8 @@ struct WriteBatchWithIndex::Rep {
   size_t last_sub_batch_offset;
   // Total number of sub-batches in the write batch. Default is 1.
   size_t sub_batch_cnt;
+  std::unordered_map<uint32_t, uint32_t> cf_id_to_count;
+  bool has_duplicated_keys = false;
 
   // Remember current offset of internal write batch, which is used as
   // the starting offset of the next record.
@@ -55,6 +57,7 @@ struct WriteBatchWithIndex::Rep {
 
   // In overwrite mode, find the existing entry for the same key and update it
   // to point to the current entry.
+  // If there are multiple entries with key, will update the last one.
   // Return true if the key is found and updated.
   bool UpdateExistingEntry(ColumnFamilyHandle* column_family, const Slice& key,
                            WriteType type);
@@ -100,7 +103,9 @@ bool WriteBatchWithIndex::Rep::UpdateExistingEntryWithCfId(
   } else if (!iter.MatchesKey(column_family_id, key)) {
     return false;
   } else {
+    has_duplicated_keys = true;
     // Move to the end of this key (NextKey-Prev)
+    // Consider Merge 1, Put 2, Merge 3. In WBWI iterator, the order is Merge 1, Put 2, Merge 3.
     iter.NextKey();  // Move to the next key
     if (iter.Valid()) {
       iter.Prev();  // Move back one entry
@@ -166,6 +171,7 @@ void WriteBatchWithIndex::Rep::AddNewEntry(uint32_t column_family_id) {
       new (mem) WriteBatchIndexEntry(last_entry_offset, column_family_id,
                                      key.data() - wb_data.data(), key.size());
   skip_list.Insert(index_entry);
+  cf_id_to_count[column_family_id]++;
 }
 
 void WriteBatchWithIndex::Rep::Clear() {
@@ -181,6 +187,8 @@ void WriteBatchWithIndex::Rep::ClearIndex() {
   last_entry_offset = 0;
   last_sub_batch_offset = 0;
   sub_batch_cnt = 1;
+  cf_id_to_count.clear();
+  has_duplicated_keys = false;
 }
 
 Status WriteBatchWithIndex::Rep::ReBuildIndex() {
@@ -310,6 +318,11 @@ WBWIIterator* WriteBatchWithIndex::NewIterator(
     ColumnFamilyHandle* column_family) {
   return new WBWIIteratorImpl(GetColumnFamilyID(column_family),
                               &(rep->skip_list), &rep->write_batch,
+                              &(rep->comparator));
+}
+
+WBWIIterator* WriteBatchWithIndex::NewIterator(uint32_t cf_id) const {
+  return new WBWIIteratorImpl(cf_id, &(rep->skip_list), &rep->write_batch,
                               &(rep->comparator));
 }
 
@@ -1131,4 +1144,12 @@ const Comparator* WriteBatchWithIndexInternal::GetUserComparator(
   return ucmps.GetComparator(cf_id);
 }
 
+const std::unordered_map<uint32_t, uint32_t>& WriteBatchWithIndex::GetColumnFamilyIDs()
+    const {
+  return rep->cf_id_to_count;
+}
+
+bool WriteBatchWithIndex::HasDuplicateKeys() const {
+  return rep->has_duplicated_keys;
+}
 }  // namespace ROCKSDB_NAMESPACE

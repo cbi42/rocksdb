@@ -693,9 +693,9 @@ ColumnFamilyData::~ColumnFamilyData() {
   if (mem_ != nullptr) {
     delete mem_->Unref();
   }
-  autovector<MemTable*> to_delete;
+  autovector<ReadOnlyMemtable*> to_delete;
   imm_.current()->Unref(&to_delete);
-  for (MemTable* m : to_delete) {
+  for (auto* m : to_delete) {
     delete m;
   }
 
