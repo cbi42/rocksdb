@@ -1325,6 +1325,7 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& wal_numbers,
       // we just ignore the update.
       // That's why we set ignore missing column families to true
       bool has_valid_writes = false;
+      // TODO: how does prepare update next_seq
       status = WriteBatchInternal::InsertInto(
           batch_to_use, column_family_memtables_.get(), &flush_scheduler_,
           &trim_history_scheduler_, true, wal_number, this,

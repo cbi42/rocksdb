@@ -12,6 +12,7 @@
 #include "db/error_handler.h"
 #include "db/event_helpers.h"
 #include "logging/logging.h"
+#include "memtable/wbwi_memtable.h"
 #include "monitoring/perf_context_imp.h"
 #include "options/options_helper.h"
 #include "test_util/sync_point.h"
@@ -189,16 +190,113 @@ Status DBImpl::WriteWithCallback(const WriteOptions& write_options,
   return s;
 }
 
+Status DBImpl::IngestWBWI(std::shared_ptr<WriteBatchWithIndex> wbwi,
+                          SequenceNumber assigned_seqno, uint64_t min_prep_log,
+                          const std::string& txn_name, bool from_write_thread,
+                          SequenceNumber last_seqno) {
+  InstrumentedMutexLock lock(&mutex_);
+  std::vector<ReadOnlyMemtable*> memtables;
+  const std::unordered_map<uint32_t, uint32_t>& cf_id_map =
+      wbwi->GetColumnFamilyIDs();
+  autovector<ColumnFamilyData*> cfds;
+  for (const auto e : cf_id_map) {
+    uint32_t cf_id = e.first;
+    if (!column_family_memtables_->Seek(cf_id)) {
+      for (auto mem : memtables) {
+        delete mem;
+      }
+      return Status::InvalidArgument(
+          "Invalid column family id from WriteBatchWithIndex: " +
+          std::to_string(cf_id));
+    }
+    ColumnFamilyData* cfd = column_family_memtables_->current();
+    WBWIMemtable* wbwi_memtable =
+        new WBWIMemtable(wbwi, cfd->user_comparator(), cf_id, cfd->ioptions(),
+                         cfd->GetLatestMutableCFOptions());
+    // This is needed to keep the WAL that contains Prepare and the write
+    // batch alive until committed data in this memtable is persisted.
+    wbwi_memtable->SetGlobalSequenceNumber(assigned_seqno);
+    wbwi_memtable->SetMinPrepLog(min_prep_log);
+    wbwi_memtable->Ref();
+    memtables.push_back(wbwi_memtable);
+    cfds.push_back(cfd);
+  }
+  // Stop writes to the DB by entering both write threads for SwitchMemtable()
+  WriteThread::Writer w;
+  if (!from_write_thread) {
+    write_thread_.EnterUnbatched(&w, &mutex_);
+  }
+  WriteThread::Writer nonmem_w;
+  if (two_write_queues_) {
+    nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
+  }
+  WaitForPendingWrites();
+
+  Status s;
+  fprintf(stdout, "IngestWBWI(): ");
+  // const SequenceNumber assign_seqno = versions_->LastSequence() + 1;
+  for (size_t i = 0; i < memtables.size(); ++i) {
+    WriteContext write_context;
+    // memtables[i]->SetGlobalSequenceNumber(assigned_seqno);
+    s = SwitchMemtable(cfds[i], &write_context, memtables[i], last_seqno);
+    if (!s.ok()) {
+      for (size_t j = i; j < memtables.size(); j++) {
+        delete memtables[j];
+        return s;
+      }
+    }
+    fprintf(stdout, "Cf: %s Txn %s, MemID %" PRIu64 ", seqno %" PRIu64 "\n",
+            cfds[i]->GetName().c_str(), txn_name.c_str(), memtables[i]->GetID(),
+            assigned_seqno);
+    fflush(stdout);
+  }
+  assert(versions_->LastSequence() < assigned_seqno);
+  fprintf(stdout, "%d memtables ingested for Txn %s\n", (int)memtables.size(),
+          txn_name.c_str());
+  // Resume writes to the DB
+  if (two_write_queues_) {
+    nonmem_write_thread_.ExitUnbatched(&nonmem_w);
+  }
+  if (!from_write_thread) {
+    write_thread_.ExitUnbatched(&w);
+  }
+  // Trigger a flush for the new immutable memtables.
+  assert(s.ok());
+  if (immutable_db_options_.atomic_flush) {
+    cfds.clear();
+    SelectColumnFamiliesForAtomicFlush(&cfds);
+    AssignAtomicFlushSeq(cfds);
+  }
+  for (const auto cfd : cfds) {
+    cfd->imm()->FlushRequested();
+    if (!immutable_db_options_.atomic_flush) {
+      FlushRequest flush_req;
+      GenerateFlushRequest({cfd}, FlushReason::kExternalFileIngestion,
+                           &flush_req);
+      EnqueuePendingFlush(flush_req);
+    }
+  }
+  if (immutable_db_options_.atomic_flush) {
+    FlushRequest flush_req;
+    GenerateFlushRequest(cfds, FlushReason::kExternalFileIngestion, &flush_req);
+    EnqueuePendingFlush(flush_req);
+  }
+  MaybeScheduleFlushOrCompaction();
+  return s;
+}
+
 // The main write queue. This is the only write queue that updates LastSequence.
 // When using one write queue, the same sequence also indicates the last
 // published sequence.
-Status DBImpl::WriteImpl(const WriteOptions& write_options,
-                         WriteBatch* my_batch, WriteCallback* callback,
-                         UserWriteCallback* user_write_cb, uint64_t* log_used,
-                         uint64_t log_ref, bool disable_memtable,
-                         uint64_t* seq_used, size_t batch_cnt,
-                         PreReleaseCallback* pre_release_callback,
-                         PostMemTableCallback* post_memtable_callback) {
+Status DBImpl::WriteImpl(
+    const WriteOptions& write_options, WriteBatch* my_batch,
+    WriteCallback* callback, UserWriteCallback* user_write_cb,
+    uint64_t* log_used, uint64_t log_ref, bool disable_memtable,
+    uint64_t* seq_used, size_t batch_cnt,
+    PreReleaseCallback* pre_release_callback,
+    PostMemTableCallback* post_memtable_callback,
+    std::shared_ptr<WriteBatchWithIndex> wbwi, uint64_t min_prep_log,
+    const std::string& txn_name) {  // TODO: remove txn_name after DEBUG
   assert(!seq_per_batch_ || batch_cnt != 0);
   assert(my_batch == nullptr || my_batch->Count() == 0 ||
          write_options.protection_bytes_per_key == 0 ||
@@ -287,6 +385,13 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     return Status::NotSupported(
         "DeleteRange is not compatible with row cache.");
   }
+  if (wbwi) {
+    if (immutable_db_options_.unordered_write) {
+      return Status::NotSupported(
+          "Ingesting WriteBatch does not support unordered_write");
+    }
+    assert(min_prep_log > 0);
+  }
   // Otherwise IsLatestPersistentState optimization does not make sense
   assert(!WriteBatchInternal::IsLatestPersistentState(my_batch) ||
          disable_memtable);
@@ -344,7 +449,11 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
   WriteThread::Writer w(write_options, my_batch, callback, user_write_cb,
                         log_ref, disable_memtable, batch_cnt,
-                        pre_release_callback, post_memtable_callback);
+                        pre_release_callback, post_memtable_callback,
+                        /*ingest_wbwi=*/wbwi != nullptr);
+  fprintf(stdout, "Writer of txn %s, reserve_seq=%d\n", txn_name.c_str(),
+          wbwi ? wbwi->GetWriteBatch()->Count() : 0);
+  fflush(stdout);
   StopWatch write_sw(immutable_db_options_.clock, stats_, DB_WRITE);
 
   write_thread_.JoinBatchGroup(&w);
@@ -373,6 +482,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     if (write_thread_.CompleteParallelMemTableWriter(&w)) {
       // we're responsible for exit batch group
       // TODO(myabandeh): propagate status to write_group
+      // Ingesting memtable should not happen with parallel memtable writer.
+      assert(!wbwi);
       auto last_sequence = w.write_group->last_sequence;
       for (auto* tmp_w : *(w.write_group)) {
         assert(tmp_w);
@@ -441,6 +552,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   TEST_SYNC_POINT("DBImpl::WriteImpl:BeforeLeaderEnters");
   last_batch_group_size_ =
       write_thread_.EnterAsBatchGroupLeader(&w, &write_group);
+  assert(!wbwi || write_group.size == 1);
 
   IOStatus io_s;
   Status pre_release_cb_status;
@@ -467,7 +579,14 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       if (writer->CheckCallback(this)) {
         valid_batches += writer->batch_cnt;
         if (writer->ShouldWriteToMemtable()) {
+          // This count includes operations before and after WAL Termination point.
           total_count += WriteBatchInternal::Count(writer->batch);
+          // total_count += writer->reserve_seqno_count;
+          fprintf(stdout, "reserved seqno count %d total_count %d\n",
+                  wbwi ? (int)(wbwi->GetWriteBatch()->Count()) : 0,
+                  (int)total_count);
+          fflush(stdout);
+          // TODO: total_bytes_size for ingest WBWI
           total_byte_size = WriteBatchInternal::AppendedByteSize(
               total_byte_size, WriteBatchInternal::ByteSize(writer->batch));
           parallel = parallel && !writer->batch->HasMerge();
@@ -498,6 +617,21 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // memtable it still consumes a seq. Otherwise, if !seq_per_batch_, we inc
     // the seq per valid written key to mem.
     size_t seq_inc = seq_per_batch_ ? valid_batches : total_count;
+    if (wbwi) {
+      // Need to reserve sequence numbers for recovery. During recovery,
+      // transactions do not commit by ingesting WBWI. The sequence number
+      // associated with the commit entry in WAL is used as the starting
+      // sequence number for inserting into memtable. We need to reserve
+      // enough sequence numbers here (at least the number of operations
+      // in write batch) so that recovery uses increasing sequence numbers
+      // for inserting into memtable.
+      //
+      // WBWI ingestion requires not grouping writes, so we don't need to
+      // consider incrementing sequence number for WBWI from other writers.
+      assert(write_group.size == 1);
+      seq_inc += wbwi->GetWriteBatch()->Count();
+    }
+    fprintf(stdout, "seq_inc %d for txn %s\n", (int)seq_inc, txn_name.c_str());
 
     const bool concurrent_update = two_write_queues_;
     // Update stats while we are an exclusive group leader, so we know
@@ -534,6 +668,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
         LogFileNumberSize& log_file_number_size =
             *(log_context.log_file_number_size);
         PERF_TIMER_GUARD(write_wal_time);
+        // print write to which WAL, which seqno
         io_s =
             WriteToWAL(write_group, log_context.writer, log_used,
                        log_context.need_log_sync, log_context.need_log_dir_sync,
@@ -555,6 +690,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     assert(last_sequence != kMaxSequenceNumber);
     const SequenceNumber current_sequence = last_sequence + 1;
     last_sequence += seq_inc;
+    fprintf(stdout, "last seqno %d\n", (int)last_sequence);
+    fflush(stdout);
 
     if (log_context.need_log_sync) {
       VersionEdit synced_wals;
@@ -674,8 +811,36 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // handle exit, false means somebody else did
     should_exit_batch_group = write_thread_.CompleteParallelMemTableWriter(&w);
   }
+  assert(!wbwi || should_exit_batch_group);
   if (should_exit_batch_group) {
     if (status.ok()) {
+      if (wbwi) {
+        fprintf(stdout, "From write thread \n");
+        fflush(stdout);
+        // versions_->LastSequence() + 1... versions_->LastSequence() +
+        // WriteBatch::Count() for memtable insertion versions_->LastSequence()
+        // + WriteBatch::Count() + 1 ... last_seqno + WriteBatch::Count() +
+        // wbwi::Count() to be reserved for recovery and for WBWI memtable
+        //   - we will assign versions_->LastSequence() + WriteBatch::Count() as
+        //   the seqno for ingested memtable.
+        assert(versions_->LastSequence() + w.batch->Count() +
+                   wbwi->GetWriteBatch()->Count() ==
+               last_sequence);
+        SequenceNumber assigned_seqno =
+            versions_->LastSequence() + w.batch->Count() + 1;
+        fprintf(stdout,
+                "Assigned seqno %d, verions_->LastSequence() %d, "
+                "w.batch->Count() %d\n",
+                (int)assigned_seqno, (int)versions_->LastSequence(),
+                (int)w.batch->Count());
+        assert(assigned_seqno <= last_sequence);
+        if (two_write_queues_) {
+          assert(assigned_seqno <= versions_->LastAllocatedSequence());
+        }
+        status = IngestWBWI(wbwi, assigned_seqno, min_prep_log, txn_name,
+                            /*from_write_thread=*/true, last_sequence);
+      }
+
       for (auto* tmp_w : write_group) {
         assert(tmp_w);
         if (tmp_w->post_memtable_callback) {
@@ -687,7 +852,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
         }
       }
       // Note: if we are to resume after non-OK statuses we need to revisit how
-      // we reacts to non-OK statuses here.
+      // we react to non-OK statuses here.
       versions_->SetLastSequence(last_sequence);
     }
     MemTableInsertStatusCheck(w.status);
@@ -1600,6 +1765,8 @@ IOStatus DBImpl::ConcurrentWriteToWAL(
 Status DBImpl::WriteRecoverableState() {
   mutex_.AssertHeld();
   if (!cached_recoverable_state_empty_) {
+    // Only for write-prepared and write-unprepared.
+    assert(seq_per_batch_);
     bool dont_care_bool;
     SequenceNumber next_seq;
     if (two_write_queues_) {
@@ -2196,7 +2363,11 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 // REQUIRES: this thread is currently at the front of the writer queue
 // REQUIRES: this thread is currently at the front of the 2nd writer queue if
 // two_write_queues_ is true (This is to simplify the reasoning.)
-Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
+// If new_imm is not nullptr, it will be added as the newest immutable memtable,
+// if and only if OK status is returned.
+Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
+                              ReadOnlyMemtable* new_imm,
+                              SequenceNumber last_seqno) {
   mutex_.AssertHeld();
   assert(lock_wal_count_ == 0);
 
@@ -2236,7 +2407,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
       creating_new_log ? versions_->NewFileNumber() : logfile_number_;
   const MutableCFOptions mutable_cf_options = *cfd->GetLatestMutableCFOptions();
 
-  // Set memtable_info for memtable sealed callback
+  // Set memtable_info for memtable sealed callback // TODO: do we need this
+  // from WBWI?
   MemTableInfo memtable_info;
   memtable_info.cf_name = cfd->GetName();
   memtable_info.first_seqno = cfd->mem()->GetFirstSequenceNumber();
@@ -2264,8 +2436,14 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     }
   }
   if (s.ok()) {
-    SequenceNumber seq = versions_->LastSequence();
-    new_mem = cfd->ConstructNewMemtable(mutable_cf_options, seq);
+    // FIXME: from comment for GetEarliestSequenceNumber(), any key with seqno
+    // >= earliest_seqno should be in this or later memtable. This means we
+    // should use LastSequence() + 1 or last_seqno + 1 here. And it needs to be
+    // incremented with file ingestion and other operations that consumes
+    // sequence number.
+    SequenceNumber seq = new_imm ? last_seqno : versions_->LastSequence();
+    new_mem =
+        cfd->ConstructNewMemtable(mutable_cf_options, /*earliest_seq=*/seq);
     context->superversion_context.NewSuperVersion();
 
     ROCKS_LOG_INFO(immutable_db_options_.info_log,
@@ -2403,6 +2581,13 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   cfd->mem()->SetNextLogNumber(logfile_number_);
   assert(new_mem != nullptr);
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
+  if (new_imm != nullptr) {
+    cfd->AssignMemtableID(new_imm);
+    // new_imm and cfd->mem() references the same WAL and has the same
+    // NextLogNumber(). They need to be flushed together.
+    new_imm->SetNextLogNumber(logfile_number_);
+    cfd->imm()->Add(new_imm, &context->memtables_to_free_);
+  }
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
@@ -2415,6 +2600,9 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   // that is okay.  If we did, it most likely means that s was already an error.
   // In any case, ignore any unchecked error for i_os here.
   io_s.PermitUncheckedError();
+  // We guarantee that if non-ok status is returned, new_imm is not added to the
+  // db. So caller can free it.
+  assert(s.ok());
   return s;
 }
 

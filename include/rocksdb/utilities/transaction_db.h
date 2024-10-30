@@ -340,6 +340,7 @@ struct TransactionOptions {
   // DeleteRange, SingleDelete.
   bool write_batch_track_timestamp_size = false;
 
+  // TODO: default to false
   bool ingest_transaction = true;
 };
 

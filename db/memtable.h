@@ -76,6 +76,137 @@ struct MemTablePostProcessInfo {
 };
 
 using MultiGetRange = MultiGetContext::Range;
+struct MemTableStats {
+  uint64_t size;
+  uint64_t count;
+};
+
+class ReadOnlyMemtable {
+ public:
+  virtual ~ReadOnlyMemtable() = default;
+  virtual const char* Name() const = 0;
+  virtual bool Get(const LookupKey& key, std::string* value,
+                   PinnableWideColumns* columns, std::string* timestamp,
+                   Status* s, MergeContext* merge_context,
+                   SequenceNumber* max_covering_tombstone_seq,
+                   SequenceNumber* seq, const ReadOptions& read_opts,
+                   bool immutable_memtable, ReadCallback* callback = nullptr,
+                   bool* is_blob_index = nullptr, bool do_merge = true) = 0;
+  bool Get(const LookupKey& key, std::string* value,
+                   PinnableWideColumns* columns, std::string* timestamp,
+                   Status* s, MergeContext* merge_context,
+                   SequenceNumber* max_covering_tombstone_seq,
+                   const ReadOptions& read_opts, bool immutable_memtable,
+                   ReadCallback* callback = nullptr,
+                   bool* is_blob_index = nullptr, bool do_merge = true) {
+    SequenceNumber seq;
+    return Get(key, value, columns, timestamp, s, merge_context,
+               max_covering_tombstone_seq, &seq, read_opts, immutable_memtable,
+               callback, is_blob_index, do_merge);
+  };
+
+  virtual void MultiGet(const ReadOptions& read_options, MultiGetRange* range,
+                        ReadCallback* callback, bool immutable_memtable) = 0;
+  virtual bool IsFragmentedRangeTombstonesConstructed() const = 0;
+  virtual FragmentedRangeTombstoneIterator* NewRangeTombstoneIterator(
+      const ReadOptions& read_options, SequenceNumber read_seq,
+      bool immutable_memtable) = 0;
+  virtual InternalIterator* NewIterator(
+      const ReadOptions& read_options,
+      UnownedPtr<const SeqnoToTimeMapping> seqno_to_time_mapping,
+      Arena* arena) = 0;
+  virtual uint64_t NumRangeDeletion() const = 0;
+  virtual uint64_t GetDataSize() const = 0;
+  virtual uint64_t num_entries() const = 0;
+  virtual uint64_t num_deletes() const = 0;
+  virtual uint64_t GetMinLogContainingPrepSection() = 0;
+  virtual SequenceNumber GetEarliestSequenceNumber() = 0;
+  virtual SequenceNumber GetFirstSequenceNumber() = 0;
+  virtual void MarkFlushed() = 0;
+  virtual size_t MemoryAllocatedBytes() const = 0;
+  virtual MemTableStats ApproximateStats(const Slice& start_ikey,
+                                       const Slice& end_ikey) = 0;
+  virtual const InternalKeyComparator& GetInternalKeyComparator() const = 0;
+  virtual size_t ApproximateMemoryUsage() = 0;
+  virtual void UniqueRandomSample(const uint64_t& target_sample_size,
+                                std::unordered_set<const char*>* entries) = 0;
+  virtual void MarkImmutable() = 0;
+  virtual uint64_t ApproximateOldestKeyTime() const = 0;
+  virtual const Slice& GetNewestUDT() const = 0;
+
+  void SetFlushCompleted(bool completed) { flush_completed_ = completed; }
+  void SetFileNumber(uint64_t file_num) { file_number_ = file_num; }
+  uint64_t GetFileNumber() const { return file_number_; }
+  void SetFlushInProgress(bool in_progress) {
+    flush_in_progress_ = in_progress;
+  }
+  void SetFlushJobInfo(std::unique_ptr<FlushJobInfo>&& info) {
+    flush_job_info_ = std::move(info);
+  };
+  // Returns the edits area that is needed for flushing the memtable
+  VersionEdit* GetEdits() { return &edit_; }
+  // Sets the next active logfile number when this memtable is about to
+  // be flushed to storage
+  // REQUIRES: external synchronization to prevent simultaneous
+  // operations on the same MemTable.
+  void SetNextLogNumber(uint64_t num) { mem_next_logfile_number_ = num; }
+  // Returns the next active logfile number when this memtable is about to
+  // be flushed to storage
+  // REQUIRES: external synchronization to prevent simultaneous
+  // operations on the same MemTable.
+  uint64_t GetNextLogNumber() {
+    assert(mem_next_logfile_number_ > 0);
+    return mem_next_logfile_number_;
+  }
+  // REQUIRES: db_mutex held.
+  void SetID(uint64_t id) { id_ = id; }
+  uint64_t GetID() const { return id_; }
+  std::unique_ptr<FlushJobInfo> ReleaseFlushJobInfo() {
+    return std::move(flush_job_info_);
+  }
+  // virtual void Ref() = 0;
+  // Increase reference count.
+  // REQUIRES: external synchronization to prevent simultaneous
+  // operations on the same MemTable.
+  void Ref() { ++refs_; }
+
+  // Drop reference count.
+  // If the refcount goes to zero return this memtable, otherwise return null.
+  // REQUIRES: external synchronization to prevent simultaneous
+  // operations on the same MemTable.
+  ReadOnlyMemtable* Unref() {
+    --refs_;
+    assert(refs_ >= 0);
+    if (refs_ <= 0) {
+      return this;
+    }
+    return nullptr;
+  }
+
+ protected:
+  friend class MemTableList;
+
+  // Sequence number of the atomic flush that is responsible for this memtable.
+  // The sequence number of atomic flush is a seq, such that no writes with
+  // sequence numbers greater than or equal to seq are flushed, while all
+  // writes with sequence number smaller than seq are flushed.
+  SequenceNumber atomic_flush_seqno_{kMaxSequenceNumber};
+  // These are used to manage memtable flushes to storage
+  bool flush_in_progress_{false};  // started the flush
+  bool flush_completed_{false};    // finished the flush
+  uint64_t file_number_{0};
+  // The updates to be applied to the transaction log when this
+  // memtable is flushed to storage.
+  VersionEdit edit_;
+  // Flush job info of the current memtable.
+  std::unique_ptr<FlushJobInfo> flush_job_info_;
+  // The log files earlier than this number can be deleted.
+  uint64_t mem_next_logfile_number_{0};
+  // Memtable id to track flush.
+  uint64_t id_ = 0;
+  int refs_{0};
+};
+
 // Note:  Many of the methods in this class have comments indicating that
 // external synchronization is required as these methods are not thread-safe.
 // It is up to higher layers of code to decide how to prevent concurrent
@@ -89,9 +220,9 @@ using MultiGetRange = MultiGetContext::Range;
 // Eg: The Superversion stores a pointer to the current MemTable (that can
 // be modified) and a separate list of the MemTables that can no longer be
 // written to (aka the 'immutable memtables').
-class MemTable {
+class MemTable final : public ReadOnlyMemtable {
  public:
-  struct KeyComparator : public MemTableRep::KeyComparator {
+  struct KeyComparator final : public MemTableRep::KeyComparator {
     const InternalKeyComparator comparator;
     explicit KeyComparator(const InternalKeyComparator& c) : comparator(c) {}
     int operator()(const char* prefix_len_key1,
@@ -119,32 +250,16 @@ class MemTable {
   MemTable& operator=(const MemTable&) = delete;
 
   // Do not delete this MemTable unless Unref() indicates it not in use.
-  ~MemTable();
+  ~MemTable() override;
 
-  // Increase reference count.
-  // REQUIRES: external synchronization to prevent simultaneous
-  // operations on the same MemTable.
-  void Ref() { ++refs_; }
-
-  // Drop reference count.
-  // If the refcount goes to zero return this memtable, otherwise return null.
-  // REQUIRES: external synchronization to prevent simultaneous
-  // operations on the same MemTable.
-  MemTable* Unref() {
-    --refs_;
-    assert(refs_ >= 0);
-    if (refs_ <= 0) {
-      return this;
-    }
-    return nullptr;
-  }
+  const char* Name() const override { return "MemTable"; }
 
   // Returns an estimate of the number of bytes of data in use by this
   // data structure.
   //
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable (unless this Memtable is immutable).
-  size_t ApproximateMemoryUsage();
+  size_t ApproximateMemoryUsage() override;
 
   // As a cheap version of `ApproximateMemoryUsage()`, this function doesn't
   // require external synchronization. The value may be less accurate though
@@ -153,7 +268,7 @@ class MemTable {
   }
 
   // used by MemTableListVersion::MemoryAllocatedBytesExcludingLast
-  size_t MemoryAllocatedBytes() const {
+  size_t MemoryAllocatedBytes() const override {
     return table_->ApproximateMemoryUsage() +
            range_del_table_->ApproximateMemoryUsage() +
            arena_.MemoryAllocatedBytes();
@@ -173,7 +288,7 @@ class MemTable {
   // implemented for any other type of memtable representation (vectorrep,
   // hashskiplist,...).
   void UniqueRandomSample(const uint64_t& target_sample_size,
-                          std::unordered_set<const char*>* entries) {
+                          std::unordered_set<const char*>* entries) override {
     // TODO(bjlemaire): at the moment, only supported by skiplistrep.
     // Extend it to all other memtable representations.
     table_->UniqueRandomSample(num_entries(), target_sample_size, entries);
@@ -210,7 +325,8 @@ class MemTable {
   // data, currently only needed for iterators serving user reads.
   InternalIterator* NewIterator(
       const ReadOptions& read_options,
-      UnownedPtr<const SeqnoToTimeMapping> seqno_to_time_mapping, Arena* arena);
+      UnownedPtr<const SeqnoToTimeMapping> seqno_to_time_mapping,
+      Arena* arena) override;
 
   // Returns an iterator that yields the range tombstones of the memtable.
   // The caller must ensure that the underlying MemTable remains live
@@ -224,7 +340,7 @@ class MemTable {
   // always creates a new fragmented range tombstone list.
   FragmentedRangeTombstoneIterator* NewRangeTombstoneIterator(
       const ReadOptions& read_options, SequenceNumber read_seq,
-      bool immutable_memtable);
+      bool immutable_memtable) override;
 
   Status VerifyEncodedEntry(Slice encoded,
                             const ProtectionInfoKVOS64& kv_prot_info);
@@ -247,6 +363,8 @@ class MemTable {
 
   // Used to Get value associated with key or Get Merge Operands associated
   // with key.
+  // Keys are considered if they are no larger than the parameter `key` in
+  // the order defined by comparator and share the save user key with `key`.
   // If do_merge = true the default behavior which is Get value for key is
   // executed. Expected behavior is described right below.
   // If memtable contains a value for key, store it in *value and return true.
@@ -275,32 +393,20 @@ class MemTable {
   // @param immutable_memtable Whether this memtable is immutable. Used
   // internally by NewRangeTombstoneIterator(). See comment above
   // NewRangeTombstoneIterator() for more detail.
+  using ReadOnlyMemtable::Get;
   bool Get(const LookupKey& key, std::string* value,
            PinnableWideColumns* columns, std::string* timestamp, Status* s,
            MergeContext* merge_context,
            SequenceNumber* max_covering_tombstone_seq, SequenceNumber* seq,
            const ReadOptions& read_opts, bool immutable_memtable,
            ReadCallback* callback = nullptr, bool* is_blob_index = nullptr,
-           bool do_merge = true);
-
-  bool Get(const LookupKey& key, std::string* value,
-           PinnableWideColumns* columns, std::string* timestamp, Status* s,
-           MergeContext* merge_context,
-           SequenceNumber* max_covering_tombstone_seq,
-           const ReadOptions& read_opts, bool immutable_memtable,
-           ReadCallback* callback = nullptr, bool* is_blob_index = nullptr,
-           bool do_merge = true) {
-    SequenceNumber seq;
-    return Get(key, value, columns, timestamp, s, merge_context,
-               max_covering_tombstone_seq, &seq, read_opts, immutable_memtable,
-               callback, is_blob_index, do_merge);
-  }
+           bool do_merge = true) override;
 
   // @param immutable_memtable Whether this memtable is immutable. Used
   // internally by NewRangeTombstoneIterator(). See comment above
   // NewRangeTombstoneIterator() for more detail.
   void MultiGet(const ReadOptions& read_options, MultiGetRange* range,
-                ReadCallback* callback, bool immutable_memtable);
+                ReadCallback* callback, bool immutable_memtable) override;
 
   // If `key` exists in current memtable with type value_type and the existing
   // value is at least as large as the new value, updates it in-place. Otherwise
@@ -359,25 +465,25 @@ class MemTable {
   // Get total number of entries in the mem table.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable (unless this Memtable is immutable).
-  uint64_t num_entries() const {
+  uint64_t num_entries() const override {
     return num_entries_.load(std::memory_order_relaxed);
   }
 
   // Get total number of deletes in the mem table.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable (unless this Memtable is immutable).
-  uint64_t num_deletes() const {
+  uint64_t num_deletes() const override {
     return num_deletes_.load(std::memory_order_relaxed);
   }
 
   // Get total number of range deletions in the mem table.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable (unless this Memtable is immutable).
-  uint64_t num_range_deletes() const {
+  uint64_t NumRangeDeletion() const override {
     return num_range_deletes_.load(std::memory_order_relaxed);
   }
 
-  uint64_t get_data_size() const {
+  uint64_t GetDataSize() const override {
     return data_size_.load(std::memory_order_relaxed);
   }
 
@@ -397,9 +503,6 @@ class MemTable {
     }
   }
 
-  // Returns the edits area that is needed for flushing the memtable
-  VersionEdit* GetEdits() { return &edit_; }
-
   // Returns if there is no entry inserted to the mem table.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable (unless this Memtable is immutable).
@@ -409,7 +512,7 @@ class MemTable {
   // into the memtable.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable (unless this Memtable is immutable).
-  SequenceNumber GetFirstSequenceNumber() {
+  SequenceNumber GetFirstSequenceNumber() override {
     return first_seqno_.load(std::memory_order_relaxed);
   }
 
@@ -428,7 +531,8 @@ class MemTable {
   //
   // If the earliest sequence number could not be determined,
   // kMaxSequenceNumber will be returned.
-  SequenceNumber GetEarliestSequenceNumber() {
+  SequenceNumber GetEarliestSequenceNumber() override {
+    // With file ingestion and empty memtable, this seqno needs to be fixed.
     return earliest_seqno_.load(std::memory_order_relaxed);
   }
 
@@ -447,31 +551,19 @@ class MemTable {
 
   void SetCreationSeq(SequenceNumber sn) { creation_seq_ = sn; }
 
-  // Returns the next active logfile number when this memtable is about to
-  // be flushed to storage
-  // REQUIRES: external synchronization to prevent simultaneous
-  // operations on the same MemTable.
-  uint64_t GetNextLogNumber() { return mem_next_logfile_number_; }
-
-  // Sets the next active logfile number when this memtable is about to
-  // be flushed to storage
-  // REQUIRES: external synchronization to prevent simultaneous
-  // operations on the same MemTable.
-  void SetNextLogNumber(uint64_t num) { mem_next_logfile_number_ = num; }
-
   // if this memtable contains data from a committed
   // two phase transaction we must take note of the
   // log which contains that data so we can know
   // when to relese that log
   void RefLogContainingPrepSection(uint64_t log);
-  uint64_t GetMinLogContainingPrepSection();
+  uint64_t GetMinLogContainingPrepSection() override;
 
   // Notify the underlying storage that no more items will be added.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable.
   // After MarkImmutable() is called, you should not attempt to
   // write anything to this MemTable().  (Ie. do not call Add() or Update()).
-  void MarkImmutable() {
+  void MarkImmutable() override {
     table_->MarkReadOnly();
     mem_tracker_.DoneAllocating();
   }
@@ -480,7 +572,7 @@ class MemTable {
   // persisted.
   // REQUIRES: external synchronization to prevent simultaneous
   // operations on the same MemTable.
-  void MarkFlushed() { table_->MarkFlushed(); }
+  void MarkFlushed() override { table_->MarkFlushed(); }
 
   // return true if the current MemTableRep supports merge operator.
   bool IsMergeOperatorSupported() const {
@@ -493,18 +585,13 @@ class MemTable {
     return table_->IsSnapshotSupported() && !moptions_.inplace_update_support;
   }
 
-  struct MemTableStats {
-    uint64_t size;
-    uint64_t count;
-  };
-
   MemTableStats ApproximateStats(const Slice& start_ikey,
-                                 const Slice& end_ikey);
+                                 const Slice& end_ikey) override;
 
   // Get the lock associated for the key
   port::RWMutex* GetLock(const Slice& key);
 
-  const InternalKeyComparator& GetInternalKeyComparator() const {
+  const InternalKeyComparator& GetInternalKeyComparator() const override {
     return comparator_.comparator;
   }
 
@@ -512,31 +599,8 @@ class MemTable {
     return &moptions_;
   }
 
-  uint64_t ApproximateOldestKeyTime() const {
+  uint64_t ApproximateOldestKeyTime() const override {
     return oldest_key_time_.load(std::memory_order_relaxed);
-  }
-
-  // REQUIRES: db_mutex held.
-  void SetID(uint64_t id) { id_ = id; }
-
-  uint64_t GetID() const { return id_; }
-
-  void SetFlushCompleted(bool completed) { flush_completed_ = completed; }
-
-  uint64_t GetFileNumber() const { return file_number_; }
-
-  void SetFileNumber(uint64_t file_num) { file_number_ = file_num; }
-
-  void SetFlushInProgress(bool in_progress) {
-    flush_in_progress_ = in_progress;
-  }
-
-  void SetFlushJobInfo(std::unique_ptr<FlushJobInfo>&& info) {
-    flush_job_info_ = std::move(info);
-  }
-
-  std::unique_ptr<FlushJobInfo> ReleaseFlushJobInfo() {
-    return std::move(flush_job_info_);
   }
 
   // Returns a heuristic flush decision
@@ -554,7 +618,7 @@ class MemTable {
   // added to an immutable memtable list. Note that if a memtable does not have
   // any range tombstone, then no range tombstone list will ever be constructed
   // and true is returned in that case.
-  bool IsFragmentedRangeTombstonesConstructed() const {
+  bool IsFragmentedRangeTombstonesConstructed() const override {
     return fragmented_range_tombstone_list_.get() != nullptr ||
            is_range_del_table_empty_;
   }
@@ -565,7 +629,7 @@ class MemTable {
   // `persist_user_defined_timestamps` to false. The tracked newest UDT will be
   // used by flush job in the background to help check the MemTable's
   // eligibility for Flush.
-  const Slice& GetNewestUDT() const;
+  const Slice& GetNewestUDT() const override;
 
   // Returns Corruption status if verification fails.
   static Status VerifyEntryChecksum(const char* entry,
@@ -581,7 +645,6 @@ class MemTable {
 
   KeyComparator comparator_;
   const ImmutableMemTableOptions moptions_;
-  int refs_;
   const size_t kArenaBlockSize;
   AllocTracker mem_tracker_;
   ConcurrentArena arena_;
@@ -598,15 +661,6 @@ class MemTable {
   // Dynamically changeable memtable option
   std::atomic<size_t> write_buffer_size_;
 
-  // These are used to manage memtable flushes to storage
-  bool flush_in_progress_;  // started the flush
-  bool flush_completed_;    // finished the flush
-  uint64_t file_number_;    // filled up after flush is complete
-
-  // The updates to be applied to the transaction log when this
-  // memtable is flushed to storage.
-  VersionEdit edit_;
-
   // The sequence number of the kv that was inserted first
   std::atomic<SequenceNumber> first_seqno_;
 
@@ -615,9 +669,6 @@ class MemTable {
   std::atomic<SequenceNumber> earliest_seqno_;
 
   SequenceNumber creation_seq_;
-
-  // The log files earlier than this number can be deleted.
-  uint64_t mem_next_logfile_number_;
 
   // the earliest log containing a prepared section
   // which has been inserted into this memtable.
@@ -642,15 +693,6 @@ class MemTable {
   // Timestamp of oldest key
   std::atomic<uint64_t> oldest_key_time_;
 
-  // Memtable id to track flush.
-  uint64_t id_ = 0;
-
-  // Sequence number of the atomic flush that is responsible for this memtable.
-  // The sequence number of atomic flush is a seq, such that no writes with
-  // sequence numbers greater than or equal to seq are flushed, while all
-  // writes with sequence number smaller than seq are flushed.
-  SequenceNumber atomic_flush_seqno_;
-
   // keep track of memory usage in table_, arena_, and range_del_table_.
   // Gets refreshed inside `ApproximateMemoryUsage()` or `ShouldFlushNow`
   std::atomic<uint64_t> approximate_memory_usage_;
@@ -658,9 +700,6 @@ class MemTable {
   // max range deletions in a memtable,  before automatic flushing, 0 for
   // unlimited.
   uint32_t memtable_max_range_deletions_ = 0;
-
-  // Flush job info of the current memtable.
-  std::unique_ptr<FlushJobInfo> flush_job_info_;
 
   // Size in bytes for the user-defined timestamps.
   size_t ts_sz_;

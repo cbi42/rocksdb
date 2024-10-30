@@ -466,7 +466,7 @@ void SuperVersion::Cleanup() {
   // decrement reference to the immutable MemtableList
   // this SV object was pointing to.
   imm->Unref(&to_delete);
-  MemTable* m = mem->Unref();
+  MemTable* m = static_cast<MemTable*>(mem->Unref());
   if (m != nullptr) {
     auto* memory_usage = current->cfd()->imm()->current_memory_usage();
     assert(*memory_usage >= m->ApproximateMemoryUsage());

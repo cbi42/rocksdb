@@ -545,6 +545,12 @@ Status MultiOpsTxnsStressTest::TestCustomOperations(
     assert(false);
   }
 
+  if (!s.ok()) {
+    fprintf(stderr, "Transaction failed %s\n", s.ToString().c_str());
+    fflush(stderr);
+    thread->shared->SafeTerminate();
+  }
+  assert(s.ok());
   return s;
 }
 
@@ -611,7 +617,12 @@ Status MultiOpsTxnsStressTest::PrimaryKeyUpdateTxn(ThreadState* thread,
     }
     auto& key_gen = key_gen_for_a_[thread->tid];
     key_gen->UndoAllocation(new_a);
-    txn->Rollback().PermitUncheckedError();
+    s = txn->Rollback();
+    if (!s.ok()) {
+      fprintf(stderr, "Transaction failed %s\n", s.ToString().c_str());
+      fflush(stderr);
+      assert(false);
+    }
   });
 
   ReadOptions ropts;
@@ -678,12 +689,23 @@ Status MultiOpsTxnsStressTest::PrimaryKeyUpdateTxn(ThreadState* thread,
     s = Status::Incomplete();
     return s;
   }
+  // EnvOptions env_options;
+  // std::vector<Options*> options;
+  // options.push_back(&options_);
+  // std::vector<ColumnFamilyHandle*> cfs{cf};
+  // s = txn->PersistForCommit(env_options, options, cfs);
+  // if (!s.ok()) {
+  //   return s;
+  // }
 
   s = WriteToCommitTimeWriteBatch(*txn);
   if (!s.ok()) {
     return s;
   }
 
+  fprintf(stdout, "PK Update txn %s, (%d, %d) -> (%d, %d)\n",
+          txn->GetName().c_str(), (int)old_a, (int)c, (int)new_a, (int)c);
+  fflush(stdout);
   s = CommitAndCreateTimestampedSnapshotIfNeeded(thread, *txn);
 
   auto& key_gen = key_gen_for_a_.at(thread->tid);
@@ -735,7 +757,13 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
     }
     auto& key_gen = key_gen_for_c_[thread->tid];
     key_gen->UndoAllocation(new_c);
-    txn->Rollback().PermitUncheckedError();
+    // txn->Rollback().PermitUncheckedError();
+    s = txn->Rollback();
+    if (!s.ok()) {
+      fprintf(stderr, "Transaction failed %s\n", s.ToString().c_str());
+      fflush(stderr);
+      assert(false);
+    }
   });
 
   // TODO (yanqin) try SetSnapshotOnNextOperation(). We currently need to take
@@ -771,6 +799,7 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
   auto* wb = txn->GetWriteBatch();
   assert(wb);
 
+  std::vector<uint32_t> old_as;
   do {
     ++iterations;
     Record record;
@@ -842,6 +871,7 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
       assert(false);
       break;
     }
+    old_as.push_back(record.a_value());
     Record new_rec(record.a_value(), b, new_c);
     std::string new_primary_index_value = new_rec.EncodePrimaryIndexValue();
     ColumnFamilyHandle* cf = db_->DefaultColumnFamily();
@@ -875,6 +905,15 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
     return s;
   }
 
+  // EnvOptions env_options;
+  // std::vector<Options*> options;
+  // options.push_back(&options_);
+  // std::vector<ColumnFamilyHandle*> cfs{db_->DefaultColumnFamily()};
+  // s = txn->PersistForCommit(env_options, options, cfs);
+  // if (!s.ok()) {
+  //   return s;
+  // }
+
   if (FLAGS_rollback_one_in > 0 && thread->rand.OneIn(FLAGS_rollback_one_in)) {
     s = Status::Incomplete();
     return s;
@@ -885,6 +924,12 @@ Status MultiOpsTxnsStressTest::SecondaryKeyUpdateTxn(ThreadState* thread,
     return s;
   }
 
+  assert(old_as.size() == 1);
+  for (const auto t : old_as) {
+    fprintf(stdout, "SK Update txn %s, (%d, %d) -> (%d, %d)\n",
+            txn->GetName().c_str(), (int)t, (int)old_c, (int)t, (int)new_c);
+    fflush(stdout);
+  }
   s = CommitAndCreateTimestampedSnapshotIfNeeded(thread, *txn);
 
   if (s.ok()) {
@@ -927,7 +972,13 @@ Status MultiOpsTxnsStressTest::UpdatePrimaryIndexValueTxn(ThreadState* thread,
     } else {
       thread->stats.AddErrors(1);
     }
-    txn->Rollback().PermitUncheckedError();
+    // txn->Rollback().PermitUncheckedError();
+    s = txn->Rollback();
+    if (!s.ok()) {
+      fprintf(stderr, "Transaction failed %s\n", s.ToString().c_str());
+      fflush(stderr);
+      assert(false);
+    }
   });
   ReadOptions ropts;
   ropts.rate_limiter_priority =
@@ -958,12 +1009,24 @@ Status MultiOpsTxnsStressTest::UpdatePrimaryIndexValueTxn(ThreadState* thread,
   if (!s.ok()) {
     return s;
   }
+  // EnvOptions env_options;
+  // std::vector<Options*> options;
+  // options.push_back(&options_);
+  // std::vector<ColumnFamilyHandle*> cfs{cf};
+  // s = txn->PersistForCommit(env_options, options, cfs);
+  // if (!s.ok()) {
+  //   return s;
+  // }
 
   if (FLAGS_rollback_one_in > 0 && thread->rand.OneIn(FLAGS_rollback_one_in)) {
     s = Status::Incomplete();
     return s;
   }
 
+  fprintf(stdout, "Update b txn %s, (%d, %d, %d) -> (%d, %d, %d)\n",
+          txn->GetName().c_str(), (int)a, (int)b - b_delta, (int)c, (int)a,
+          (int)b, (int)c);
+  fflush(stdout);
   s = WriteToCommitTimeWriteBatch(*txn);
   if (!s.ok()) {
     return s;
@@ -1349,10 +1412,12 @@ void MultiOpsTxnsStressTest::ProcessRecoveredPreparedTxnsHelper(
     Transaction* txn, SharedState* shared) {
   thread_local Random rand(static_cast<uint32_t>(FLAGS_seed));
   if (rand.OneIn(2)) {
+    fprintf(stdout, "Recovery, commit txn %s\n", txn->GetName().c_str());
     Status s = txn->Commit();
     ProcessStatus(shared, "ProcessRecoveredPreparedTxnsHelper", s,
                   /*ignore_injected_error=*/false);
   } else {
+    fprintf(stdout, "Recovery, rollback txn %s\n", txn->GetName().c_str());
     Status s = txn->Rollback();
     ProcessStatus(shared, "ProcessRecoveredPreparedTxnsHelper", s,
                   /*ignore_injected_error=*/false);
@@ -1606,6 +1671,7 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
   fprintf(stdout, "a from [%u, %u), c from [%u, %u)\n",
           static_cast<unsigned int>(lb_a), static_cast<unsigned int>(ub_a),
           static_cast<unsigned int>(lb_c), static_cast<unsigned int>(ub_c));
+  fflush(stdout);
 
   assert(ub_a > lb_a && ub_a > lb_a + threads);
   assert(ub_c > lb_c && ub_c > lb_c + threads);
@@ -1636,6 +1702,10 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
     }
     std::unique_ptr<Iterator> it(db_->NewIterator(ropts));
 
+    // store all seen db record
+    std::vector<uint32_t> aaa;
+    std::vector<uint32_t> bbb;
+    std::vector<uint32_t> ccc;
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
       Record record;
       Status s = record.DecodePrimaryIndexEntry(it->key(), it->value());
@@ -1646,6 +1716,9 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
         assert(false);
       }
       uint32_t a = record.a_value();
+      aaa.push_back(a);
+      bbb.push_back(record.b_value());
+      ccc.push_back(record.c_value());
       assert(a >= lb_a);
       assert(a < ub_a);
       uint32_t tid = (a - lb_a) / num_a_per_thread;
@@ -1663,7 +1736,11 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
         tid = threads - 1;
       }
       auto& existing_c_uniq = existing_c_uniqs[tid];
-      existing_c_uniq.insert(c);
+      auto r = existing_c_uniq.insert(c);
+      if (!r.second) {
+        fprintf(stdout, "duplicated c %d with pk %d\n", (int)c, (int)a);
+        fflush(stdout);
+      }
     }
 
     for (uint32_t a = lb_a; a < ub_a; ++a) {
@@ -1694,7 +1771,30 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
       uint32_t high = (i < threads - 1) ? (low + num_a_per_thread) : ub_a;
 
       // The following two assertions assume the test thread count and key
-      // space remain the same across different runs. Will need to relax.
+      // space remain the same across different runs. Will need to relax. //
+      // TODO: does transactions not modify this?
+      if (existing_a_uniqs[i].size() != high - low - 1) {
+        fprintf(stderr,
+                "existing_a_uniqs[%d] size is %d, non_existing size is %d\n", i,
+                (int)(existing_a_uniqs[i].size()),
+                (int)(non_existing_a_uniqs[i].size()));
+        fprintf(stderr,
+                "existing_c_uniqs[%d] size is %d, non_existing size is %d\n", i,
+                (int)(existing_c_uniqs[i].size()),
+                (int)(non_existing_c_uniqs[i].size()));
+        for (size_t j = 0; j < aaa.size(); ++j) {
+          uint32_t a = aaa[j];
+          uint32_t tid = (a - lb_a) / num_a_per_thread;
+          if (tid >= static_cast<uint32_t>(threads)) {
+            tid = threads - 1;
+          }
+          if ((int)tid == i) {
+            fprintf(stdout, "record: (a,b,c) = %d, %d, %d\n", (int)a,
+                    (int)bbb[j], (int)ccc[j]);
+          }
+          fflush(stdout);
+        }
+      }
       assert(existing_a_uniqs[i].size() == high - low - 1);
       assert(non_existing_a_uniqs[i].size() == 1);
 
@@ -1709,6 +1809,28 @@ void MultiOpsTxnsStressTest::ScanExistingDb(SharedState* shared, int threads) {
 
       // The following two assertions assume the test thread count and key
       // space remain the same across different runs. Will need to relax.
+      if (existing_c_uniqs[i].size() != high - low - 1) {
+        fprintf(stderr,
+                "existing_a_uniqs[%d] size is %d, non_existing size is %d\n", i,
+                (int)(existing_a_uniqs[i].size()),
+                (int)(non_existing_a_uniqs[i].size()));
+        fprintf(stderr,
+                "existing_c_uniqs[%d] size is %d, non_existing size is %d\n", i,
+                (int)(existing_c_uniqs[i].size()),
+                (int)(non_existing_c_uniqs[i].size()));
+        for (size_t j = 0; j < aaa.size(); ++j) {
+          uint32_t a = aaa[j];
+          uint32_t tid = (a - lb_a) / num_a_per_thread;
+          if (tid >= static_cast<uint32_t>(threads)) {
+            tid = threads - 1;
+          }
+          if ((int)tid == i) {
+            fprintf(stdout, "record: (a,b,c) = %d, %d, %d\n", (int)a,
+                    (int)bbb[j], (int)ccc[j]);
+          }
+          fflush(stdout);
+        }
+      }
       assert(existing_c_uniqs[i].size() == high - low - 1);
       assert(non_existing_c_uniqs[i].size() == 1);
 

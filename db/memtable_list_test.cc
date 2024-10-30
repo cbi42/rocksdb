@@ -329,6 +329,7 @@ TEST_F(MemTableListTest, GetTest) {
   // This is to make assert(memtable->IsFragmentedRangeTombstonesConstructed())
   // in MemTableListVersion::GetFromList work.
   mem->ConstructFragmentedRangeTombstones();
+  mem->SetID(1);
   list.Add(mem, &to_delete);
 
   SequenceNumber saved_seq = seq;
@@ -337,6 +338,7 @@ TEST_F(MemTableListTest, GetTest) {
   WriteBufferManager wb2(options.db_write_buffer_size);
   MemTable* mem2 = new MemTable(cmp, ioptions, MutableCFOptions(options), &wb2,
                                 kMaxSequenceNumber, 0 /* column_family_id */);
+  mem2->SetID(2);
   mem2->Ref();
 
   ASSERT_OK(
@@ -879,8 +881,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
     // Refcount should be 0 after calling TryInstallMemtableFlushResults.
     // Verify this, by Ref'ing then UnRef'ing:
     m->Ref();
-    ASSERT_TRUE(m->UnrefFlushable());
-    // ASSERT_EQ(m, m->UnrefF());
+    ASSERT_EQ(m, m->Unref());
     delete m;
   }
   to_delete.clear();
@@ -923,8 +924,7 @@ TEST_F(MemTableListTest, FlushPendingTest) {
     // Refcount should be 0 after calling TryInstallMemtableFlushResults.
     // Verify this, by Ref'ing then UnRef'ing:
     m->Ref();
-    // ASSERT_EQ(m, m->Unref());
-    ASSERT_TRUE(m->UnrefFlushable());
+    ASSERT_EQ(m, m->Unref());
     delete m;
   }
   to_delete.clear();
@@ -1085,8 +1085,7 @@ TEST_F(MemTableListTest, AtomicFlushTest) {
     // Refcount should be 0 after calling InstallMemtableFlushResults.
     // Verify this by Ref'ing and then Unref'ing.
     m->Ref();
-    // ASSERT_EQ(m, m->Unref());
-    ASSERT_TRUE(m->UnrefFlushable());
+    ASSERT_EQ(m, m->Unref());
     delete m;
   }
 }

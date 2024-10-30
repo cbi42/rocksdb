@@ -8,6 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include <memory>
+#include <memtable/wbwi_memtable.h>
 
 #include "db/column_family.h"
 #include "db/db_test_util.h"
@@ -1262,6 +1263,193 @@ TEST_F(WriteBatchTest, CommitWithTimestamp) {
                 Slice(ts).ToString(true) + ")",
             handler.seen);
 }
+
+
+// TODO: MultiCF - when test with txn
+// TODO: update once merge is supported and s can be merge in progress
+std::string Get(const std::string &k, WBWIMemtable* wbwi_mem, SequenceNumber snapshot_seq, bool* found_final_value) {
+  LookupKey lkey(k, snapshot_seq);
+  std::string val;
+  SequenceNumber max_range_del_seqno = 0;
+  SequenceNumber out_seqno = 0;
+  bool is_blob_index = false;
+  Status s;
+  *found_final_value = wbwi_mem->Get(lkey, &val, nullptr, nullptr, &s, nullptr, &max_range_del_seqno,
+  &out_seqno, ReadOptions(), true, nullptr,
+  &is_blob_index, true);
+  if (s.ok()) {
+    if (*found_final_value) {
+      EXPECT_FALSE(val.empty());
+      return val;
+    } else {
+      return "NOT_FOUND";
+    }
+  } else {
+    EXPECT_TRUE(s.IsNotFound());
+    EXPECT_TRUE(*found_final_value);
+    return "NOT_FOUND";
+  }
+}
+
+TEST_F(WriteBatchTest, ReadFromWBWIMemtable) {
+  // Mini stress test for read.
+  // Do random 10000 write and delete operations
+  // Then do some overwrite
+  // Keep track of expected state, then verify with
+  // Get, MultiGet, and Iterator.
+  const Comparator* cmp = BytewiseComparator();
+  auto wbwi = std::make_shared<WriteBatchWithIndex>(cmp,  0, true, 0, 0);
+  Options opts;
+  ImmutableOptions immutable_opts(opts);
+  MutableCFOptions mutable_cf_options(opts);
+
+  Random rnd(301);
+  std::vector<std::pair<std::string, std::string>> expected;
+  expected.resize(10000);
+  for (int i = 0; i < 10000; ++i) {
+    std::string key = DBTestBase::Key(i);
+    bool del = rnd.OneIn(2);
+    std::string val = del? "NOT_FOUND" : rnd.RandomString(50);
+    expected[i] = std::make_pair(key, val);
+  }
+  RandomShuffle(expected.begin(), expected.end());
+
+  WBWIMemtable* wbwi_mem = new WBWIMemtable(wbwi, cmp, 0, &immutable_opts,
+    &mutable_cf_options);
+  const SequenceNumber visible_seq = 3;
+  wbwi_mem->SetGlobalSequenceNumber(2);
+  bool found_final_value = false;
+  for (const auto& p : expected) {
+    if (p.second == "NOT_FOUND") {
+      bool sd = rnd.OneIn(2);
+      if (sd) {
+        // std::cout << "SD  " << p.first << std::endl;
+        wbwi->SingleDelete(p.first);
+      } else {
+        // std::cout << "DEL " << p.first << std::endl;
+        wbwi->Delete(p.first);
+      }
+    } else {
+      // std::cout << "PUT " << p.first << " -> " << p.second << std::endl;
+      wbwi->Put(p.first, p.second);
+    }
+    found_final_value = false;
+    ASSERT_TRUE(p.second == Get(p.first, wbwi_mem, visible_seq, &found_final_value));
+    ASSERT_TRUE(found_final_value);
+  }
+
+  RandomShuffle(expected.begin(), expected.end());
+  // Do some overwrites
+  for (size_t i = 0; i < 1000; ++i) {
+    if (expected[i].second != "NOT_FOUND") {
+      bool put = rnd.OneIn(2);
+      if (put) {
+        std::string val = rnd.RandomString(100);
+        expected[i].second = val;
+        wbwi->Put(expected[i].first, val);
+        // std::cout << "PUT " << expected[i].first << " -> " << expected[i].second << std::endl;
+      } else {
+        expected[i].second = "NOT_FOUND";
+        bool sd = rnd.OneIn(2);
+        if (sd) {
+          // std::cout << "SD  " << expected[i].first << std::endl;
+          wbwi->SingleDelete(expected[i].first);
+        } else {
+          // std::cout << "DEL " << expected[i].first << std::endl;
+          wbwi->Delete(expected[i].first);
+        }
+      }
+      found_final_value = false;
+      ASSERT_TRUE(expected[i].second == Get(expected[i].first, wbwi_mem, visible_seq, &found_final_value));
+      ASSERT_TRUE(found_final_value);
+    }
+  }
+    // read a non-existing key
+    found_final_value = false;
+    ASSERT_EQ("NOT_FOUND", Get("foo", wbwi_mem, visible_seq, &found_final_value));
+    ASSERT_FALSE(found_final_value);
+  // read at a non-visible snapshot
+  found_final_value = false;
+  ASSERT_EQ("NOT_FOUND", Get(DBTestBase::Key(0), wbwi_mem, 1, &found_final_value));
+  ASSERT_FALSE(found_final_value);
+
+
+  RandomShuffle(expected.begin(), expected.end());
+  for (const auto& p : expected) {
+    found_final_value = false;
+    ASSERT_TRUE(p.second == Get(p.first, wbwi_mem, visible_seq, &found_final_value));
+    ASSERT_TRUE(found_final_value);
+  }
+
+  int batch_size = 30;
+  for (int i = 0; i < 1000; i += batch_size) {
+    autovector<KeyContext> key_context;
+    autovector<KeyContext*, MultiGetContext::MAX_BATCH_SIZE> sorted_keys;
+    sorted_keys.resize(batch_size);
+    std::vector<PinnableSlice> values(batch_size);
+    std::vector<Status> statuses(batch_size);
+    std::vector<Slice> key_slice;
+    int cur_batch_size = std::min(1000, i + batch_size) - i;
+    for (int j = 0; j < cur_batch_size; ++j) {
+      key_slice.push_back(expected[i + j].first);
+    }
+    for (int j = 0; j < cur_batch_size; ++j) {
+      key_context.emplace_back(nullptr, key_slice[j], &values[j],
+        nullptr, nullptr, &statuses[j]);
+    }
+    for (int j = 0; j < cur_batch_size; ++j) {
+      sorted_keys[j] = &key_context[j];
+    }
+    std::sort(sorted_keys.begin(), sorted_keys.begin() + cur_batch_size, [](const KeyContext* a, const KeyContext* b) {
+      return a->key->compare(*b->key) < 0;
+    });
+
+    MultiGetContext ctx(&sorted_keys, 0,
+                        cur_batch_size, visible_seq, ReadOptions(), immutable_opts.fs.get(),
+                        immutable_opts.statistics.get());
+    MultiGetRange range = ctx.GetMultiGetRange();
+    wbwi_mem->MultiGet(ReadOptions(), &range, nullptr, true);
+    for (int j = 0; j < cur_batch_size; ++j) {
+      if (expected[i + j].second == "NOT_FOUND") {
+        ASSERT_TRUE(statuses[j].IsNotFound());
+      } else {
+        ASSERT_OK(statuses[j]);
+        ASSERT_EQ(values[j], expected[i + j].second);
+      }
+    }
+  }
+
+  std::sort(expected.begin(), expected.end(), [](std::pair<std::string, std::string> a, std::pair<std::string, std::string> b) {
+    return a.first < b.first;
+  });
+
+  Arena arena;
+  std::unique_ptr<InternalIterator> iter{wbwi_mem->NewIterator(ReadOptions(), nullptr, &arena)};
+  ASSERT_OK(iter->status());
+  iter->SeekToFirst();
+  for (const auto& p : expected) {
+    ASSERT_OK(iter->status());
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ(ExtractUserKey(iter->key()), p.first);
+    SequenceNumber dummy;
+    ValueType val_type;
+    UnPackSequenceAndType(ExtractInternalKeyFooter(iter->key()), &dummy,
+                        &val_type);
+    if (p.second == "NOT_FOUND") {
+      ASSERT_TRUE(val_type == kTypeDeletion || val_type == kTypeSingleDeletion);
+    } else {
+      ASSERT_EQ(val_type, kTypeValue);
+      ASSERT_EQ(iter->value(), p.second);
+    }
+
+    iter->Next();
+  }
+  ASSERT_OK(iter->status());
+  ASSERT_FALSE(iter->Valid());
+  delete wbwi_mem;
+  iter.release();
+}
+
 
 }  // namespace ROCKSDB_NAMESPACE
 
