@@ -7826,6 +7826,370 @@ TEST_F(TransactionDBTest, FlushedLogWithPendingPrepareIsSynced) {
   }
 }
 
+// TODO: parameterize two_write_queue
+class LargeTransactionTest : public DBTestBase {
+ public:
+  LargeTransactionTest() : DBTestBase("large_txn_test", true) {}
+};
+
+TEST_F(LargeTransactionTest, BypassMemtableBasicTest) {
+  Options options = CurrentOptions();
+  options.create_if_missing = true;
+  options.allow_2pc = true;
+  options.two_write_queues = true;
+  // write_bypass_memtable creates more immutable memtables
+  options.max_write_buffer_number = 8;
+  // Destroy the DB to recreate as a TransactionDB.
+  Close();
+  Destroy(options, true);
+
+  // Create a TransactionDB.
+  TransactionDB* txn_db = nullptr;
+  TransactionDBOptions txn_db_opts;
+  txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
+  ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+  ASSERT_NE(txn_db, nullptr);
+  db_ = txn_db;
+
+  WriteOptions wopts;
+  TransactionOptions txn_opts;
+  txn_opts.commit_bypass_memtable = true;
+  Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+  txn1->Put(Key(0), "val0");
+  txn1->Delete(Key(1));
+  txn1->SetName("xid1");
+  txn1->Prepare();
+  ASSERT_TRUE(txn1->GetCommitBypassMemTable());
+  txn1->Commit();
+
+  txn_opts.commit_bypass_memtable = false;
+  txn1 = txn_db->BeginTransaction(wopts, txn_opts, txn1);
+  ASSERT_FALSE(txn1->GetCommitBypassMemTable());
+
+  delete txn1;
+
+  PinnableSlice value;
+  ASSERT_OK(
+      db_->Get(ReadOptions(), db_->DefaultColumnFamily(), Key(0), &value));
+  ASSERT_EQ(value, "val0");
+  ASSERT_TRUE(
+      db_->Get(ReadOptions(), db_->DefaultColumnFamily(), Key(1), &value)
+          .IsNotFound());
+}
+
+// TODO: a transaction containing multiple operations on the same key
+// TODO: parameterize other txn tests with this txn option
+// TODO: multi cf updates test
+// TODO: consider a generalized verify_db helper that uses get, multiget, and
+// iterator
+//  to verify expected db state
+TEST_F(LargeTransactionTest, IngestLargeTxnBasicReadTest) {
+  for (bool disable_flush : {false, true}) {
+    Options options = CurrentOptions();
+    options.create_if_missing = true;
+    options.allow_2pc = true;
+    options.two_write_queues = true;
+    // Avoid write stall
+    options.max_write_buffer_number = 8;
+    // Destroy the DB to recreate as a TransactionDB.
+    Close();
+    Destroy(options, true);
+
+    TransactionDB* txn_db = nullptr;
+    TransactionDBOptions txn_db_opts;
+    txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
+    ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+    ASSERT_NE(txn_db, nullptr);
+    db_ = txn_db;
+    if (disable_flush) {
+      ASSERT_OK(db_->PauseBackgroundWork());
+    }
+
+    WriteOptions wopts;
+    for (int i = 0; i < 10000; i += 3) {
+      ASSERT_OK(db_->Put(wopts, Key(i), "foo"));
+    }
+    const Snapshot* snapshot = db_->GetSnapshot();
+
+    TransactionOptions txn_opts;
+    txn_opts.commit_bypass_memtable = true;
+    Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+    for (int i = 0; i < 10000; i += 2) {
+      txn1->Put(Key(i), "val" + std::to_string(i));
+      txn1->Delete(Key(i + 1));
+    }
+    ASSERT_OK(txn1->SetName("xid1"));
+    ASSERT_OK(txn1->Prepare());
+    ASSERT_OK(txn1->Commit());
+
+    ReadOptions ro_snapshot;
+    ro_snapshot.snapshot = snapshot;
+    std::unique_ptr<Iterator> iter{db_->NewIterator(ro_snapshot)};
+    std::vector<Slice> keys;
+    std::vector<std::string> key_strs;
+    std::vector<std::string> values;
+    // Verify at snapshot
+    for (int i = 0; i < 10000; i += 3) {
+      PinnableSlice value;
+      ASSERT_OK(
+          db_->Get(ro_snapshot, db_->DefaultColumnFamily(), Key(i), &value));
+      ASSERT_EQ("foo", value);
+      ASSERT_TRUE(
+          db_->Get(ro_snapshot, db_->DefaultColumnFamily(), Key(i + 1), &value)
+              .IsNotFound());
+      ASSERT_TRUE(
+          db_->Get(ro_snapshot, db_->DefaultColumnFamily(), Key(i + 2), &value)
+              .IsNotFound());
+      iter->Seek(Key(i));
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_EQ(iter->key(), Key(i));
+      ASSERT_EQ(iter->value(), "foo");
+
+      key_strs = {Key(i), Key(i + 1), Key(i + 2)};
+      keys = {key_strs[0], key_strs[1], key_strs[2]};
+      std::vector<Status> status = db_->MultiGet(ro_snapshot, keys, &values);
+      ASSERT_OK(status[0]);
+      ASSERT_EQ(values[0], "foo");
+      ASSERT_TRUE(status[1].IsNotFound());
+      ASSERT_TRUE(status[2].IsNotFound());
+    }
+
+    // Verify latest state
+    iter.reset(db_->NewIterator({}));
+    for (int i = 0; i < 10000; i += 2) {
+      PinnableSlice value;
+      ASSERT_OK(
+          db_->Get(ReadOptions(), db_->DefaultColumnFamily(), Key(i), &value));
+      ASSERT_EQ("val" + std::to_string(i), value);
+      ASSERT_TRUE(db_->Get(ReadOptions(), db_->DefaultColumnFamily(),
+                           Key(i + 1), &value)
+                      .IsNotFound());
+      iter->Seek(Key(i));
+      ASSERT_EQ(iter->key(), Key(i));
+      ASSERT_EQ(iter->value(), "val" + std::to_string(i));
+
+      key_strs = {Key(i), Key(i + 1)};
+      keys = {key_strs[0], key_strs[1]};
+      std::vector<Status> status = db_->MultiGet({}, keys, &values);
+      ASSERT_OK(status[0]);
+      ASSERT_EQ(values[0], "val" + std::to_string(i));
+      ASSERT_TRUE(status[1].IsNotFound());
+    }
+    iter.reset();
+
+    db_->ReleaseSnapshot(snapshot);
+    if (disable_flush) {
+      ASSERT_OK(db_->ContinueBackgroundWork());
+    }
+    ASSERT_OK(db_->Flush({}));
+    for (int i = 0; i < 10000; i += 2) {
+      PinnableSlice value;
+      ASSERT_OK(
+          db_->Get(ReadOptions(), db_->DefaultColumnFamily(), Key(i), &value));
+      ASSERT_EQ("val" + std::to_string(i), value);
+      ASSERT_TRUE(db_->Get(ReadOptions(), db_->DefaultColumnFamily(),
+                           Key(i + 1), &value)
+                      .IsNotFound());
+    }
+    delete txn1;
+  }
+}
+
+// TEST_F(LargeTransactionTest, BasicMultiCFTest) {
+//   Options options = CurrentOptions();
+//   options.create_if_missing = true;
+//   options.allow_2pc = true;
+//   options.two_write_queues = true;
+//   options.max_write_buffer_number = 8;
+//   // Destroy the DB to recreate as a TransactionDB.
+//   Close();
+//   Destroy(options, true);
+//
+//   // Create a TransactionDB.
+//   TransactionDB* txn_db = nullptr;
+//   TransactionDBOptions txn_db_opts;
+//   txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
+//   ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+//   ASSERT_NE(txn_db, nullptr);
+//   db_ = txn_db;
+//
+//   // Create two more columns other than default CF.
+//   std::vector<std::string> cfs = {"puppy", "kitty"};
+//   CreateColumnFamilies(cfs, options);
+//   ASSERT_EQ(handles_.size(), 2);
+//   ASSERT_EQ(handles_[0]->GetName(), cfs[0]);
+//   ASSERT_EQ(handles_[1]->GetName(), cfs[1]);
+//
+//   WriteOptions wopts;
+//   TransactionOptions txn_opts;
+//   Transaction* txn1 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+//   ASSERT_NE(txn1, nullptr);
+//   ASSERT_OK(txn1->Put(handles_[0], "k1", "v1"));
+//   ASSERT_OK(txn1->Put(handles_[0], "k0", "v1"));
+//   ASSERT_OK(txn1->Put(handles_[1], "k0", "v2"));
+//   ASSERT_OK(txn1->Delete(handles_[1], "l1"));
+//   ASSERT_OK(txn1->Put(handles_[1], "k3", "v3"));
+//
+//   // A txn must be named before prepare.
+//   ASSERT_OK(txn1->SetName("txn1"));
+//   // Prepare writes to WAL, but not to memtable. (WriteCommitted)
+//   ASSERT_OK(txn1->Prepare());
+//   ASSERT_OK(txn1->Commit());
+//   delete txn1;
+//
+//   // Empty txn
+//   Transaction* txn2 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+//   txn2->SetName("txn2");
+//   txn2->Prepare();
+//   txn2->Commit();
+//   delete txn2;
+//
+//   // Commit without prepare
+//   Transaction* txn3 = txn_db->BeginTransaction(wopts, txn_opts, nullptr);
+//   txn3->SetName("txn3");
+//   txn3->Put(handles_[0], "Txn3", "Txn3");
+//   txn3->Commit();
+//   delete txn3;
+//
+//   std::string val;
+//   ASSERT_OK(db_->Get(ReadOptions(), handles_[0], "k0", &val));
+//   // std::cout << "Get from CF1 k0 -> " << val << std::endl;
+//   ASSERT_EQ(val, "v1");
+//   ASSERT_OK(db_->Get(ReadOptions(), handles_[1], "k3", &val));
+//   // std::cout << "Get from CF 2 k3 -> " << val << std::endl;
+//   ASSERT_EQ(val, "v3");
+//
+//   std::vector<std::pair<std::string, std::string>> expected0{
+//     {"Txn3", "Txn3"},
+//     {"k0", "v1"},
+//     {"k1", "v1"}
+//   };
+//   std::unique_ptr<Iterator> iter{db_->NewIterator(ReadOptions(),
+//   handles_[0])}; iter->SeekToFirst(); for (size_t i = 0; i <
+//   expected0.size(); ++i) {
+//     ASSERT_TRUE(iter->Valid());
+//     // std::cout << iter->key().ToString() << " -> " <<
+//     iter->value().ToString()
+//               // << std::endl;
+//     ASSERT_EQ(iter->key().ToString(), expected0[i].first);
+//     ASSERT_EQ(iter->value().ToString(), expected0[i].second);
+//     iter->Next();
+//   }
+//   ASSERT_FALSE(iter->Valid());
+//   ASSERT_OK(iter->status());
+//
+//   std::vector<std::pair<std::string, std::string>> expected1{
+//       {"k0", "v2"},
+//       {"k3", "v3"}
+//   };
+//   // std::cout << "CF2 " << std::endl;
+//   iter.reset(db_->NewIterator(ReadOptions(), handles_[1]));
+//   iter->SeekToFirst();
+//   for (size_t i = 0; i < expected1.size(); ++i) {
+//     ASSERT_TRUE(iter->Valid());
+//     // std::cout << iter->key().ToString() << " -> " <<
+//     iter->value().ToString()
+//               // << std::endl;
+//     ASSERT_EQ(iter->key().ToString(), expected1[i].first);
+//     ASSERT_EQ(iter->value().ToString(), expected1[i].second);
+//     iter->Next();
+//   }
+//   ASSERT_FALSE(iter->Valid());
+//   ASSERT_OK(iter->status());
+//   iter.reset();
+//
+//   ASSERT_OK(db_->Flush({}, handles_[0]));
+//   iter.reset(db_->NewIterator(ReadOptions(), handles_[0]));
+//   iter->SeekToFirst();
+//   for (size_t i = 0; i < expected0.size(); ++i) {
+//     ASSERT_TRUE(iter->Valid());
+//     // std::cout << iter->key().ToString() << " -> " <<
+//     iter->value().ToString()
+//     // << std::endl;
+//     ASSERT_EQ(iter->key().ToString(), expected0[i].first);
+//     ASSERT_EQ(iter->value().ToString(), expected0[i].second);
+//     iter->Next();
+//   }
+//   ASSERT_FALSE(iter->Valid());
+//   ASSERT_OK(iter->status());
+//
+//   std::cout << "CF2 " << std::endl;
+//   iter.reset(db_->NewIterator(ReadOptions(), handles_[1]));
+//   iter->SeekToFirst();
+//   for (size_t i = 0; i < expected1.size(); ++i) {
+//     ASSERT_TRUE(iter->Valid());
+//     // std::cout << iter->key().ToString() << " -> " <<
+//     iter->value().ToString()
+//     // << std::endl;
+//     ASSERT_EQ(iter->key().ToString(), expected1[i].first);
+//     ASSERT_EQ(iter->value().ToString(), expected1[i].second);
+//     iter->Next();
+//   }
+//   ASSERT_FALSE(iter->Valid());
+//   ASSERT_OK(iter->status());
+//   iter.reset();
+//
+//   cfs.push_back(kDefaultColumnFamilyName);
+//   ASSERT_OK(TryReopenWithColumnFamilies(cfs, options));
+//   DBImpl* db_impl = static_cast<DBImpl*>(db_);
+//   ASSERT_TRUE(db_impl->allow_2pc());
+//   iter.reset(db_->NewIterator(ReadOptions(), handles_[0]));
+//   iter->SeekToFirst();
+//   iter->SeekToFirst();
+//   for (size_t i = 0; i < expected0.size(); ++i) {
+//     ASSERT_TRUE(iter->Valid());
+//     // std::cout << iter->key().ToString() << " -> " <<
+//     iter->value().ToString()
+//     // << std::endl;
+//     ASSERT_EQ(iter->key().ToString(), expected0[i].first);
+//     ASSERT_EQ(iter->value().ToString(), expected0[i].second);
+//     iter->Next();
+//   }
+//   ASSERT_FALSE(iter->Valid());
+//   ASSERT_OK(iter->status());
+//
+//   std::cout << "CF2 " << std::endl;
+//   iter.reset(db_->NewIterator(ReadOptions(), handles_[1]));
+//   iter->SeekToFirst();
+//   for (size_t i = 0; i < expected1.size(); ++i) {
+//     ASSERT_TRUE(iter->Valid());
+//     // std::cout << iter->key().ToString() << " -> " <<
+//     iter->value().ToString()
+//     // << std::endl;
+//     ASSERT_EQ(iter->key().ToString(), expected1[i].first);
+//     ASSERT_EQ(iter->value().ToString(), expected1[i].second);
+//     iter->Next();
+//   }
+//   ASSERT_FALSE(iter->Valid());
+//   ASSERT_OK(iter->status());
+//   iter.reset();
+// }
+//
+// TEST_F(LargeTransactionTest, RecoverIngestedTxn) {
+//   // TODO: Test that ingested txn can be recovered.
+//   // and that seqno is assigned correctly such that a later operation
+//   // won't be assigned a smaller sequence number.
+//   //  1. not committed.
+//   //  2. committed.
+//   Options options = CurrentOptions();
+//   options.create_if_missing = true;
+//   options.allow_2pc = true;
+//   options.two_write_queues = true;
+//   options.max_write_buffer_number = 8;
+//   // Destroy the DB to recreate as a TransactionDB.
+//   Close();
+//   Destroy(options, true);
+//
+//   // Create a TransactionDB.
+//   TransactionDB* txn_db = nullptr;
+//   TransactionDBOptions txn_db_opts;
+//   txn_db_opts.write_policy = TxnDBWritePolicy::WRITE_COMMITTED;
+//   ASSERT_OK(TransactionDB::Open(options, txn_db_opts, dbname_, &txn_db));
+//   ASSERT_NE(txn_db, nullptr);
+//   db_ = txn_db;
+//
+// }
+
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
