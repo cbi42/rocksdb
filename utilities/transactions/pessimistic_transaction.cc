@@ -119,7 +119,10 @@ PessimisticTransaction::~PessimisticTransaction() {
 }
 
 void PessimisticTransaction::Clear() {
-  txn_db_impl_->UnLock(this, *tracked_locks_);
+  {
+    PERF_TIMER_FOR_WAIT_GUARD(key_lock_wait_time);
+    txn_db_impl_->UnLock(this, *tracked_locks_);
+  }
   TransactionBaseImpl::Clear();
 }
 

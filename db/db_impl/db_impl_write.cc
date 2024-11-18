@@ -793,6 +793,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     should_exit_batch_group = write_thread_.CompleteParallelMemTableWriter(&w);
   }
   if (wbwi) {
+    PERF_TIMER_FOR_WAIT_GUARD(write_memtable_time);
     if (status.ok()) {
       assert(versions_->LastSequence() + w.batch->Count() +
                  wbwi->GetWriteBatch()->Count() ==
