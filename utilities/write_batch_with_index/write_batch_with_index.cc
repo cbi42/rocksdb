@@ -105,15 +105,10 @@ bool WriteBatchWithIndex::Rep::UpdateExistingEntryWithCfId(
     return false;
   } else if (!iter.MatchesKey(column_family_id, key)) {
     return false;
-  } else {
-    // Move to the end of this key (NextKey-Prev)
-    iter.NextKey();  // Move to the next key
-    if (iter.Valid()) {
-      iter.Prev();  // Move back one entry
-    } else {
-      iter.SeekToLast();
-    }
   }
+  // Seek() guarantees that we are at the first entry with key == `key`, which
+  // is the most recently update to `key` (see WriteBatchEntryComparator). So
+  // we can just update the offset of this entry.
   WriteBatchIndexEntry* non_const_entry =
       const_cast<WriteBatchIndexEntry*>(iter.GetRawEntry());
   if (LIKELY(last_sub_batch_offset <= non_const_entry->offset)) {

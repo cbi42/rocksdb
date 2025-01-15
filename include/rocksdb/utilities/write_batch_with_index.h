@@ -62,16 +62,24 @@ class WBWIIterator {
 
   virtual void SeekToLast() = 0;
 
-  virtual void Seek(const Slice& key) = 0;
+  // Move to the first entry with key >= target.
+  // Since entries with the same key is ordered by decreasing offset in WBWI,
+  // if there are multiple updates to the same key, the first entry will
+  // be the most recent update. When overwrite_key is true for this WBWI, this
+  // should only affect iterator output the write batch contains Merge.
+  virtual void Seek(const Slice& target) = 0;
 
-  virtual void SeekForPrev(const Slice& key) = 0;
+  // Move to the last entry with key <= target.
+  // If there are multiple updates to the same key, this will move iterator
+  // to the last entry, which is the oldest update.
+  virtual void SeekForPrev(const Slice& target) = 0;
 
   virtual void Next() = 0;
 
   virtual void Prev() = 0;
 
-  // the return WriteEntry is only valid until the next mutation of
-  // WriteBatchWithIndex
+  // The returned WriteEntry is only valid until the next mutation of
+  // WriteBatchWithIndex.
   virtual WriteEntry Entry() const = 0;
 
   // For this user key, there is a single delete in this write batch,
@@ -195,7 +203,8 @@ class WriteBatchWithIndex : public WriteBatchBase {
   // if overwrite_key=false, then each update will be returned as a separate
   // entry, in the order of update time.
   // if overwrite_key=true, then one entry per key will be returned. Merge
-  // updates on the same key will be returned as separate entries.
+  // updates on the same key will be returned as separate entries, with most
+  // recent update ordered first.
   //
   // The returned iterator should be deleted by the caller.
   WBWIIterator* NewIterator(ColumnFamilyHandle* column_family);
@@ -229,7 +238,7 @@ class WriteBatchWithIndex : public WriteBatchBase {
 
   // Similar to previous function but does not require a column_family.
   // Note:  An InvalidArgument status will be returned if there are any Merge
-  // operators for this key.  Use previous method instead.
+  // operators for this key. Use previous method instead.
   Status GetFromBatch(const DBOptions& options, const Slice& key,
                       std::string* value) {
     return GetFromBatch(nullptr, options, key, value);
