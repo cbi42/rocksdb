@@ -236,7 +236,7 @@ struct TableProperties {
   // the number of blocks in this table
   uint64_t num_data_blocks = 0;
   // the number of entries in this table
-  uint64_t num_entries = 0;
+  uint64_t num_entries = 0; // TODO: check include range del?
   // the number of unique entries (keys or prefixes) added to filters
   uint64_t num_filter_entries = 0;
   // the number of deletions in the table

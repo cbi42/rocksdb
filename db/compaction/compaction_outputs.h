@@ -272,7 +272,7 @@ class CompactionOutputs {
       Status s = close_file_func(*this, status, empty_key);
       if (!s.ok() && status.ok()) {
         status = s;
-      }
+    }
     }
 
     return status;
