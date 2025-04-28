@@ -337,6 +337,12 @@ int MemTable::KeyComparator::operator()(
   return comparator.CompareKeySeq(a, key);
 }
 
+int MemTable::KeyComparator::operator()(
+    const KeyComparator::DecodedType& key1,
+    const KeyComparator::DecodedType& key2) const {
+  return comparator.CompareKeySeq(key1, key2);
+}
+
 void MemTableRep::InsertConcurrently(KeyHandle /*handle*/) {
   throw std::runtime_error("concurrent insert not supported");
 }

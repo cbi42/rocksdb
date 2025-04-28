@@ -80,6 +80,9 @@ class MemTableRep {
     virtual int operator()(const char* prefix_len_key,
                            const Slice& key) const = 0;
 
+    virtual int operator()(const DecodedType& key1,
+                           const DecodedType& key2) const = 0;
+
     virtual ~KeyComparator() {}
   };
 
@@ -403,9 +406,10 @@ class SkipListFactory : public MemTableRepFactory {
 //     bytes reserved for usage.
 class VectorRepFactory : public MemTableRepFactory {
   size_t count_;
+  bool optimize_sort_;
 
  public:
-  explicit VectorRepFactory(size_t count = 0);
+  explicit VectorRepFactory(size_t count = 0, bool optimize_sort = false);
 
   // Methods for Configurable/Customizable class overrides
   static const char* kClassName() { return "VectorRepFactory"; }

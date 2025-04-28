@@ -1284,6 +1284,8 @@ DEFINE_uint32(memtable_op_scan_flush_trigger,
                   .memtable_op_scan_flush_trigger,
               "Setting for CF option memtable_op_scan_flush_trigger.");
 
+DEFINE_bool(vector_rep_optimize_sort, false, "Optimize vector memtable sort");
+
 static enum ROCKSDB_NAMESPACE::CompressionType StringToCompressionType(
     const char* ctype) {
   assert(ctype);
@@ -1820,7 +1822,7 @@ static Status CreateMemTableRepFactory(
     factory->reset(NewHashSkipListRepFactory(FLAGS_hash_bucket_count));
   } else if (!strcasecmp(FLAGS_memtablerep.c_str(),
                          VectorRepFactory::kNickName())) {
-    factory->reset(new VectorRepFactory());
+    factory->reset(new VectorRepFactory(0, FLAGS_vector_rep_optimize_sort));
   } else if (!strcasecmp(FLAGS_memtablerep.c_str(), "hash_linkedlist")) {
     factory->reset(NewHashLinkListRepFactory(FLAGS_hash_bucket_count));
   } else {

@@ -22,7 +22,8 @@ namespace {
 
 class VectorRep : public MemTableRep {
  public:
-  VectorRep(const KeyComparator& compare, Allocator* allocator, size_t count);
+  VectorRep(const KeyComparator& compare, Allocator* allocator, size_t count,
+            bool optimize_sort);
 
   // Insert key into the collection. (The caller will pack key and value into a
   // single buffer and pass that in as the parameter to Insert)
@@ -101,6 +102,7 @@ class VectorRep : public MemTableRep {
   mutable port::RWMutex rwlock_;
   bool immutable_;
   bool sorted_;
+  bool optimize_sort_;
   const KeyComparator& compare_;
 };
 
@@ -130,11 +132,12 @@ size_t VectorRep::ApproximateMemoryUsage() {
 }
 
 VectorRep::VectorRep(const KeyComparator& compare, Allocator* allocator,
-                     size_t count)
+                     size_t count, bool optimize_sort)
     : MemTableRep(allocator),
       bucket_(new Bucket()),
       immutable_(false),
       sorted_(false),
+      optimize_sort_(optimize_sort),
       compare_(compare) {
   bucket_.get()->reserve(count);
 }
@@ -153,8 +156,32 @@ void VectorRep::Iterator::DoSort() const {
   if (!sorted_ && vrep_ != nullptr) {
     WriteLock l(&vrep_->rwlock_);
     if (!vrep_->sorted_) {
-      std::sort(bucket_->begin(), bucket_->end(),
-                stl_wrappers::Compare(compare_));
+      if (vrep_->optimize_sort_) {
+        std::vector<std::pair<const char*, Slice>> tmp;
+        tmp.reserve(bucket_->size());
+        // Decode each item into tmp
+        for (const char* entry : *bucket_) {
+          Slice decoded_key = compare_.decode_key(entry);
+          tmp.emplace_back(entry, decoded_key);
+          // tmp.push_back(std::make_pair(entry, decoded_key));
+        }
+
+        // Sort tmp based on the decoded keys
+        std::sort(tmp.begin(), tmp.end(), [&](const auto& a, const auto& b) {
+          return compare_(a.second, b.second) < 0;
+        });
+
+        // // Repopulate bucket_ with sorted entries
+        // for (size_t i = 0; i < tmp.size(); i++) {
+        //   (*bucket_)[i] = tmp[i].first;
+        // }
+        std::transform(tmp.begin(), tmp.end(), bucket_->begin(),
+              [](auto&& pair) { return std::move(pair.first); });
+                      //  [](const auto& pair) { return pair.first; });
+      } else {
+        std::sort(bucket_->begin(), bucket_->end(),
+                  stl_wrappers::Compare(compare_));
+      }
       cit_ = bucket_->begin();
       vrep_->sorted_ = true;
     }
@@ -295,13 +322,14 @@ static std::unordered_map<std::string, OptionTypeInfo> vector_rep_table_info = {
       OptionTypeFlags::kNone}},
 };
 
-VectorRepFactory::VectorRepFactory(size_t count) : count_(count) {
+VectorRepFactory::VectorRepFactory(size_t count, bool optimize_sort)
+    : count_(count), optimize_sort_(optimize_sort) {
   RegisterOptions("VectorRepFactoryOptions", &count_, &vector_rep_table_info);
 }
 
 MemTableRep* VectorRepFactory::CreateMemTableRep(
     const MemTableRep::KeyComparator& compare, Allocator* allocator,
     const SliceTransform*, Logger* /*logger*/) {
-  return new VectorRep(compare, allocator, count_);
+  return new VectorRep(compare, allocator, count_, optimize_sort_);
 }
 }  // namespace ROCKSDB_NAMESPACE

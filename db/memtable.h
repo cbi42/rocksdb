@@ -542,6 +542,8 @@ class MemTable final : public ReadOnlyMemTable {
                    const char* prefix_len_key2) const override;
     int operator()(const char* prefix_len_key,
                    const DecodedType& key) const override;
+    int operator()(const DecodedType& key1,
+                   const DecodedType& key2) const override;
   };
 
   // earliest_seq should be the current SequenceNumber in the db such that any
