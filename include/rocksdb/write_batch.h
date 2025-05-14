@@ -31,6 +31,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "rocksdb/status.h"
 #include "rocksdb/write_batch_base.h"
@@ -373,7 +374,8 @@ class WriteBatch : public WriteBatchBase {
       return OptionState::kUnknown;
     }
   };
-  Status Iterate(Handler* handler) const;
+  Status Iterate(Handler* handler,
+                 std::unordered_set<uint32_t>* cf_id_set = nullptr) const;
 
   // Retrieve the serialized version of this batch.
   const std::string& Data() const { return rep_; }

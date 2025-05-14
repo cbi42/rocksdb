@@ -941,8 +941,8 @@ def finalize_and_sanitize(src_params):
         # disable atomic flush.
         if dest_params["test_best_efforts_recovery"] == 0:
             dest_params["disable_wal"] = 0
-    if dest_params.get("allow_concurrent_memtable_write", 1) == 1:
-        dest_params["memtablerep"] = "skip_list"
+    # if dest_params.get("allow_concurrent_memtable_write", 1) == 1:
+    #     dest_params["memtablerep"] = "skip_list"
     if (
         dest_params.get("enable_compaction_filter", 0) == 1
         or dest_params.get("inplace_update_support", 0) == 1

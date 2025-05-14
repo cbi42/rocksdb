@@ -561,6 +561,8 @@ class MemTable final : public ReadOnlyMemTable {
 
   ~MemTable() override;
 
+  void DoneInsertBatch() { table_->DoneInsertBatch(); }
+
   const char* Name() const override { return "MemTable"; }
 
   size_t ApproximateMemoryUsage() override;

@@ -2020,6 +2020,7 @@ struct DBWithColumnFamilies {
       delete opt_txn_db;
       opt_txn_db = nullptr;
     } else {
+      static_cast<DBImpl*>(db)->DumpStats();
       delete db;
       db = nullptr;
     }

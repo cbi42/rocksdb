@@ -230,7 +230,8 @@ class WriteBatchInternal {
 
   // Iterate over [begin, end) range of a write batch
   static Status Iterate(const WriteBatch* wb, WriteBatch::Handler* handler,
-                        size_t begin, size_t end);
+                        size_t begin, size_t end,
+                        std::unordered_set<uint32_t>* cf_id_set = nullptr);
 
   // This write batch includes the latest state that should be persisted. Such
   // state meant to be used only during recovery.

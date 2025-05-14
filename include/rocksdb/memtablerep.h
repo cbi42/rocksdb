@@ -98,6 +98,8 @@ class MemTableRep {
   // collection, and no concurrent modifications to the table in progress
   virtual void Insert(KeyHandle handle) = 0;
 
+  virtual void DoneInsertBatch() {}
+
   // Same as ::Insert
   // Returns false if MemTableRepFactory::CanHandleDuplicatedKey() is true and
   // the <key, seq> already exists.
@@ -412,6 +414,8 @@ class VectorRepFactory : public MemTableRepFactory {
   static const char* kNickName() { return "vector"; }
   const char* Name() const override { return kClassName(); }
   const char* NickName() const override { return kNickName(); }
+
+  bool IsInsertConcurrentlySupported() const override { return true; }
 
   // Methods for MemTableRepFactory class overrides
   using MemTableRepFactory::CreateMemTableRep;

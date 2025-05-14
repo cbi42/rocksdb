@@ -509,18 +509,20 @@ Status ReadRecordFromWriteBatch(Slice* input, char* tag,
   return Status::OK();
 }
 
-Status WriteBatch::Iterate(Handler* handler) const {
+Status WriteBatch::Iterate(Handler* handler,
+                           std::unordered_set<uint32_t>* cf_id_set) const {
   if (rep_.size() < WriteBatchInternal::kHeader) {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
 
   return WriteBatchInternal::Iterate(this, handler, WriteBatchInternal::kHeader,
-                                     rep_.size());
+                                     rep_.size(), cf_id_set);
 }
 
 Status WriteBatchInternal::Iterate(const WriteBatch* wb,
                                    WriteBatch::Handler* handler, size_t begin,
-                                   size_t end) {
+                                   size_t end,
+                                   std::unordered_set<uint32_t>* cf_id_set) {
   if (begin > wb->rep_.size() || end > wb->rep_.size() || end < begin) {
     return Status::Corruption("Invalid start/end bounds for Iterate");
   }
@@ -569,6 +571,9 @@ Status WriteBatchInternal::Iterate(const WriteBatch* wb,
       }
       last_was_try_again = true;
       s = Status::OK();
+    }
+    if (cf_id_set) {
+      cf_id_set->insert(column_family);
     }
 
     switch (tag) {
@@ -3202,6 +3207,15 @@ class MemTableInserter : public WriteBatch::Handler {
   }
 };
 
+void DoneWriteBatchInsert(std::unordered_set<uint32_t>& cf_ids,
+                          ColumnFamilyMemTables* memtables) {
+  for (auto cf_id : cf_ids) {
+    if (memtables->Seek(cf_id)) {
+      memtables->GetMemTable()->DoneInsertBatch();
+    }
+  }
+}
+
 }  // anonymous namespace
 
 // This function can only be called in these conditions:
@@ -3233,7 +3247,9 @@ Status WriteBatchInternal::InsertInto(
     SetSequence(w->batch, inserter.sequence());
     inserter.set_log_number_ref(w->log_ref);
     inserter.set_prot_info(w->batch->prot_info_.get());
-    w->status = w->batch->Iterate(&inserter);
+    std::unordered_set<uint32_t> updated_cfs;
+    w->status = w->batch->Iterate(&inserter, &updated_cfs);
+    DoneWriteBatchInsert(updated_cfs, memtables);
     if (!w->status.ok()) {
       return w->status;
     }
@@ -3263,7 +3279,9 @@ Status WriteBatchInternal::InsertInto(
   SetSequence(writer->batch, sequence);
   inserter.set_log_number_ref(writer->log_ref);
   inserter.set_prot_info(writer->batch->prot_info_.get());
-  Status s = writer->batch->Iterate(&inserter);
+  std::unordered_set<uint32_t> updated_cfs;
+  Status s = writer->batch->Iterate(&inserter, &updated_cfs);
+  DoneWriteBatchInsert(updated_cfs, memtables);
   assert(!seq_per_batch || batch_cnt != 0);
   assert(!seq_per_batch || inserter.sequence() - sequence == batch_cnt);
   if (concurrent_memtable_writes) {
@@ -3284,7 +3302,9 @@ Status WriteBatchInternal::InsertInto(
                             ignore_missing_column_families, log_number, db,
                             concurrent_memtable_writes, batch->prot_info_.get(),
                             has_valid_writes, seq_per_batch, batch_per_txn);
-  Status s = batch->Iterate(&inserter);
+  std::unordered_set<uint32_t> updated_cfs;
+  Status s = batch->Iterate(&inserter, &updated_cfs);
+  DoneWriteBatchInsert(updated_cfs, memtables);
   if (next_seq != nullptr) {
     *next_seq = inserter.sequence();
   }
