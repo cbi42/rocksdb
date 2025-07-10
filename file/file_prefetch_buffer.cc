@@ -789,6 +789,7 @@ bool FilePrefetchBuffer::TryReadFromCacheUntracked(
     return false;
   }
 
+  // ----- TODO: some special case of PrefetchAsync
   if (explicit_prefetch_submitted_) {
     // explicit_prefetch_submitted_ is special case where it expects request
     // submitted in PrefetchAsync should match with this request. Otherwise
@@ -805,6 +806,9 @@ bool FilePrefetchBuffer::TryReadFromCacheUntracked(
   AllocateBufferIfEmpty();
   BufferInfo* buf = GetFirstBuffer();
 
+  // ---------- no prefetching if reading from an offset earlier than last
+  // offset
+  // ------ TODO: what's the relation between buf->offset_ and prev_offset_?
   if (!explicit_prefetch_submitted_ && offset < buf->offset_) {
     return false;
   }
@@ -813,12 +817,12 @@ bool FilePrefetchBuffer::TryReadFromCacheUntracked(
   bool copy_to_overlap_buffer = false;
   // If the buffer contains only a few of the requested bytes:
   //    If readahead is enabled: prefetch the remaining bytes + readahead
-  //    bytes
-  //        and satisfy the request.
+  //    bytes and satisfy the request.
   //    If readahead is not enabled: return false.
   TEST_SYNC_POINT_CALLBACK("FilePrefetchBuffer::TryReadFromCache",
                            &readahead_size_);
 
+  // Whether needs to read from file
   if (explicit_prefetch_submitted_ ||
       (buf->async_read_in_progress_ ||
        offset + n > buf->offset_ + buf->CurrentSize())) {
@@ -830,6 +834,7 @@ bool FilePrefetchBuffer::TryReadFromCacheUntracked(
       assert(max_readahead_size_ >= readahead_size_);
 
       if (implicit_auto_readahead_) {
+        // Checks for sequential scan, what about block cache?
         if (!IsEligibleForPrefetch(offset, n)) {
           // Ignore status as Prefetch is not called.
           s.PermitUncheckedError();
@@ -872,6 +877,7 @@ bool FilePrefetchBuffer::TryReadFromCacheUntracked(
   assert(buf->IsOffsetInBuffer(offset));
   uint64_t offset_in_buffer = offset - buf->offset_;
   assert(offset_in_buffer < buf->CurrentSize());
+  // TODO: under what condition would the std::min below be useful?
   *result = Slice(
       buf->buffer_.BufferStart() + offset_in_buffer,
       std::min(n, buf->CurrentSize() - static_cast<size_t>(offset_in_buffer)));

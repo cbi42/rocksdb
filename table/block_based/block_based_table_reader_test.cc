@@ -990,6 +990,114 @@ TEST_P(BlockBasedTableReaderTestVerifyChecksum, ChecksumMismatch) {
   ASSERT_EQ(s.code(), Status::kCorruption);
 }
 
+TEST_P(BlockBasedTableReaderTest, MultiScanPrepare) {
+  Options options;
+  ReadOptions read_opts;
+  size_t ts_sz = options.comparator->timestamp_size();
+  std::vector<std::pair<std::string, std::string>> kv =
+      BlockBasedTableReaderBaseTest::GenerateKVMap(
+          100 /* num_block */,
+          true /* mixed_with_human_readable_string_value */, ts_sz);
+
+  std::string table_name = "BlockBasedTableReaderTest_NewIterator" +
+                           CompressionTypeToString(compression_type_);
+
+  ImmutableOptions ioptions(options);
+  CreateTable(table_name, ioptions, compression_type_, kv,
+              compression_parallel_threads_, compression_dict_bytes_);
+  std::cout << "Compression type: " << (int)compression_type_ << std::endl;
+
+  std::unique_ptr<BlockBasedTable> table;
+  FileOptions foptions;
+  foptions.use_direct_reads = true;
+  InternalKeyComparator comparator(options.comparator);
+  NewBlockBasedTableReader(foptions, ioptions, comparator, table_name, &table,
+                           true /* bool prefetch_index_and_filter_in_cache */,
+                           nullptr /* status */, persist_udt_);
+
+  std::unique_ptr<InternalIterator> iter;
+  iter.reset(table->NewIterator(
+      read_opts, options_.prefix_extractor.get(), /*arena=*/nullptr,
+      /*skip_filters=*/false, TableReaderCaller::kUncategorized));
+
+  size_t end = kEntriesPerBlock;
+  // TODO: add upper bound check for this
+  // e.g., second seek might want the same data block as the first scan.
+  // What if DBIter reads one more key that is from the next block?...
+  // TODO: work with null limit
+  std::vector<ScanOptions> scan_options({
+      ScanOptions(ExtractUserKey(kv[0].first),
+                  ExtractUserKey(kv[end + 1].first)),
+      ScanOptions(ExtractUserKey(kv[end + 1].first),
+                  ExtractUserKey(kv[2 * end].first)),
+  }  //  ScanOptions(kv[160].first, kv[180].first)}
+     // {ScanOptions(kv[1500].first)}
+  );
+
+  iter->Prepare(&scan_options);
+  iter->Seek(kv[0].first);
+  for (size_t i = 0; i < end + 1; ++i) {
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ(iter->key().ToString(), kv[i].first);
+    iter->Next();
+  }
+  // ASSERT_FALSE(iter->Valid());
+  ASSERT_OK(iter->status());
+  // TODO: fix assertion in terminal
+  iter->Seek(kv[end + 1].first);
+  for (size_t i = end + 1; i < 2 * end; ++i) {
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ(iter->key().ToString(), kv[i].first);
+    iter->Next();
+  }
+
+  iter.reset(table->NewIterator(
+      read_opts, options_.prefix_extractor.get(), /*arena=*/nullptr,
+      /*skip_filters=*/false, TableReaderCaller::kUncategorized));
+  iter->Prepare(&scan_options);
+  iter->Seek(kv[0].first);
+  for (size_t i = 0; i < end + 1; ++i) {
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ(iter->key().ToString(), kv[i].first);
+    iter->Next();
+  }
+  // ASSERT_FALSE(iter->Valid());
+  ASSERT_OK(iter->status());
+  // TODO: fix assertion in terminal
+  iter->Seek(kv[end + 1].first);
+  for (size_t i = end + 1; i < 2 * end; ++i) {
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_EQ(iter->key().ToString(), kv[i].first);
+    iter->Next();
+  }
+
+
+  // // Test forward scan.
+  // ASSERT_TRUE(!iter->Valid());
+  // iter->SeekToFirst();
+  // ASSERT_OK(iter->status());
+  // for (auto kv_iter = kv.begin(); kv_iter != kv.end(); kv_iter++) {
+  //   ASSERT_EQ(iter->key().ToString(), kv_iter->first);
+  //   ASSERT_EQ(iter->value().ToString(), kv_iter->second);
+  //   iter->Next();
+  //   ASSERT_OK(iter->status());
+  // }
+  // ASSERT_TRUE(!iter->Valid());
+  // ASSERT_OK(iter->status());
+
+  // // Test backward scan.
+  // iter->SeekToLast();
+  // ASSERT_OK(iter->status());
+  // for (auto kv_iter = kv.rbegin(); kv_iter != kv.rend(); kv_iter++) {
+  //   ASSERT_EQ(iter->key().ToString(), kv_iter->first);
+  //   ASSERT_EQ(iter->value().ToString(), kv_iter->second);
+  //   iter->Prev();
+  //   ASSERT_OK(iter->status());
+  // }
+  // ASSERT_TRUE(!iter->Valid());
+  // ASSERT_OK(iter->status());
+}
+
 // Param 1: compression type
 // Param 2: whether to use direct reads
 // Param 3: Block Based Table Index type, partitioned filters are also enabled

@@ -410,6 +410,7 @@ IOStatus BlockFetcher::ReadBlockContents() {
 }
 
 IOStatus BlockFetcher::ReadAsyncBlockContents() {
+  // Should we update read pattern when block is read from persistent cache?
   if (TryGetUncompressBlockFromPersistentCache()) {
     compression_type() = kNoCompression;
 #ifndef NDEBUG

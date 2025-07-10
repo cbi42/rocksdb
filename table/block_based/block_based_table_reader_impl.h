@@ -43,7 +43,7 @@ struct IterTraits<IndexBlockIter> {
 // into an iterator over the contents of the corresponding block.
 // If input_iter is null, new a iterator
 // If input_iter is not null, update this iter and return it
-template <typename TBlockIter>
+template <typename TBlockIter>  // DataBlockIter
 TBlockIter* BlockBasedTable::NewDataBlockIterator(
     const ReadOptions& ro, const BlockHandle& handle, TBlockIter* input_iter,
     BlockType block_type, GetContext* get_context,

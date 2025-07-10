@@ -287,6 +287,10 @@ class BlockBasedTable : public TableReader {
   static inline CompressionType GetBlockCompressionType(
       const BlockContents& contents) {
     assert(contents.has_trailer);
+    printf("GetBlockCompressionType %d, block_size %d\n",
+           (int)GetBlockCompressionType(contents.data.data(),
+                                        contents.data.size()),
+           (int)contents.data.size());
     return GetBlockCompressionType(contents.data.data(), contents.data.size());
   }
 
@@ -295,10 +299,18 @@ class BlockBasedTable : public TableReader {
   Status GetKVPairsFromDataBlocks(const ReadOptions& read_options,
                                   std::vector<KVPairBlock>* kv_pair_blocks);
 
+  // Look up the block cache for the specified block.
+  // out_parsed_block is set to nullptr if the block is not found in the cache.
   template <typename TBlocklike>
   Status LookupAndPinBlocksInCache(
       const ReadOptions& ro, const BlockHandle& handle,
       CachableEntry<TBlocklike>* out_parsed_block) const;
+
+  template <typename TBlocklike>
+  Status MaybeReadAndPinBlocksInCache(
+      const ReadOptions& ro, const BlockHandle& handle,
+      CachableEntry<TBlocklike>* out_parsed_block,
+      BlockContents* block_contents = nullptr) const;
 
   struct Rep;
 

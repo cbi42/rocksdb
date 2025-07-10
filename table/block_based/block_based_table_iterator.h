@@ -62,6 +62,8 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
             (block_iter_points_to_real_block_ && block_iter_.Valid()));
   }
 
+  void Prepare(const std::vector<ScanOptions>* scan_opts) override;
+
   // For block cache readahead lookup scenario -
   // If is_at_first_key_from_index_ is true, InitDataBlock hasn't been
   // called. It means block_handles is empty and index_ point to current block.
@@ -139,6 +141,9 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
     // block_handles if it's index is invalid. So index_iter_->status check can
     // be skipped.
     // Prefix index set status to NotFound when the prefix does not exist.
+    // For prepared_ case, IsIndexAtCurr() will be false. Rely on
+    // block_iter_points_to_real_block_.
+    assert(!prepared_ || !IsIndexAtCurr());
     if (IsIndexAtCurr() && !index_iter_->status().ok() &&
         !index_iter_->status().IsNotFound()) {
       return index_iter_->status();
@@ -182,6 +187,8 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
            block_iter_points_to_real_block_;
   }
 
+  // Upper bound check result is set to unknown, upper layer (LevelIterator)
+  // may iterate into the next file in the same level
   void ResetDataIter() {
     if (block_iter_points_to_real_block_) {
       if (pinned_iters_mgr_ != nullptr && pinned_iters_mgr_->PinningEnabled()) {
@@ -216,6 +223,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
     if (read_options_.adaptive_readahead) {
       block_prefetcher_.SetReadaheadState(
           &(readahead_file_info->data_block_readahead_info));
+      // TODO: here we check existence of index_iter_..
       if (index_iter_) {
         index_iter_->SetReadaheadState(readahead_file_info);
       }
@@ -344,6 +352,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
   // During cache lookup to find readahead size, index_iter_ is iterated and it
   // can point to a different block. is_index_at_curr_block_ keeps track of
   // that.
+  // Whether index is expected to match the current data_block_iter_
   bool is_index_at_curr_block_ = true;
   bool is_index_out_of_bound_ = false;
 
@@ -389,6 +398,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
         !table_->PrefixRangeMayMatch(ikey, read_options_, prefix_extractor_,
                                      need_upper_bound_check_, &lookup_context_,
                                      filter_checked)) {
+      // TODO TODO?
       // TODO remember the iterator is invalidated because of prefix
       // match. This can avoid the upper level file iterator to falsely
       // believe the position is the end of the SST file and move to
@@ -472,5 +482,32 @@ class BlockBasedTableIterator : public InternalIteratorBase<Slice> {
                                     uint64_t& end_updated_offset,
                                     size_t& prev_handles_size);
   // *** END APIs relevant to auto tuning of readahead_size ***
+
+  // *** MultiScan Prepare related APIs and states ***
+  bool prepared_ = false;
+  std::vector<CachableEntry<Block>> multiscan_pinned_data_blocks_;
+  // offset -> cached block entry
+  std::unordered_map<uint64_t, CachableEntry<Block>> prepared_data_blocks_;
+  const std::vector<ScanOptions>* scan_opts_;
+  std::vector<int> starting_block_per_scan_;
+  // inclusive start, exclusive end
+  std::vector<std::tuple<size_t, size_t>> block_ranges_per_scan_;
+  size_t next_multi_scan_idx_;
+  size_t cur_data_block_idx_;
+  size_t cur_scan_start_idx_;
+  size_t cur_scan_end_idx_;
+
+  // Helper methods for Prepare() implementation
+  void CollectBlocksForRange(const RangeOpt& range,
+                             std::vector<BlockHandle>& blocks_to_prepare);
+  void CoalesceAndPrefetchBlocks(const std::vector<BlockHandleInfo>& blocks);
+  void ProcessCoalescedGroup(const std::vector<BlockHandleInfo>& blocks,
+                             const std::vector<size_t>& group_indices);
+  void IssueCoalescedRead(const std::vector<BlockHandleInfo>& blocks,
+                          const std::vector<size_t>& blocks_to_read);
+
+  // start must be set
+  std::vector<BlockHandle> GetBlockHandlesForRange(const RangeOpt& range);
+  // *** END MultiScan Prepare related APIs and states ***
 };
 }  // namespace ROCKSDB_NAMESPACE

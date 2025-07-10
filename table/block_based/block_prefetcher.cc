@@ -12,6 +12,9 @@
 #include "table/block_based/block_based_table_reader.h"
 
 namespace ROCKSDB_NAMESPACE {
+
+// Read block pointed to by `handle`
+//
 void BlockPrefetcher::PrefetchIfNeeded(
     const BlockBasedTable::Rep* rep, const BlockHandle& handle,
     const size_t readahead_size, bool is_for_compaction,
@@ -31,6 +34,7 @@ void BlockPrefetcher::PrefetchIfNeeded(
 
   const size_t len = BlockBasedTable::BlockSizeWithTrailer(handle);
   const size_t offset = handle.offset();
+  // TODO: read for compaction code?
   if (is_for_compaction) {
     if (!rep->file->use_direct_io() && compaction_readahead_size_ > 0) {
       // If FS supports prefetching (readahead_limit_ will be non zero in that
@@ -104,6 +108,8 @@ void BlockPrefetcher::PrefetchIfNeeded(
 
   // If FS supports prefetching (readahead_limit_ will be non zero in that case)
   // and current block exists in prefetch buffer then return.
+  //
+  // ----- Block already prefetched according to readahead_limit_
   if (offset + len <= readahead_limit_) {
     UpdateReadPattern(offset, len);
     return;
@@ -132,6 +138,9 @@ void BlockPrefetcher::PrefetchIfNeeded(
     return;
   }
 
+  // readahead_size_ is used for FS prefetching, not for when prefetch buffer is
+  // used.
+  // ----- ? Why is readahead_size_ not used for direct_io?
   if (readahead_size_ > max_auto_readahead_size) {
     readahead_size_ = max_auto_readahead_size;
   }
@@ -142,6 +151,7 @@ void BlockPrefetcher::PrefetchIfNeeded(
   if (!s.ok()) {
     return;
   }
+  // Use File system prefetching
   s = rep->file->Prefetch(
       opts, handle.offset(),
       BlockBasedTable::BlockSizeWithTrailer(handle) + readahead_size_);

@@ -56,6 +56,7 @@ class BlockHandle {
   void set_offset(uint64_t _offset) { offset_ = _offset; }
 
   // The size of the stored block
+  // This size excludes the block trailer.
   uint64_t size() const { return size_; }
   void set_size(uint64_t _size) { size_ = _size; }
 
