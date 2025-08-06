@@ -531,6 +531,8 @@ Status ExternalSstFileIngestionJob::Run() {
 
   // Find levels to ingest into
   std::optional<int> prev_batch_uppermost_level;
+  // batches at the front of file_batches_to_ingest_ contains older updates and
+  // are placed lower in the DB.
   for (auto& batch : file_batches_to_ingest_) {
     int batch_uppermost_level = 0;
     status = AssignLevelsForOneBatch(batch, super_version, force_global_seqno,
