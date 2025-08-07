@@ -180,6 +180,9 @@ struct IngestedFileInfo : public KeyRangeInfo {
   // the user key's format in the external file matches the column family's
   // setting.
   bool user_defined_timestamps_persisted = true;
+
+  SequenceNumber largest_seqno = kMaxSequenceNumber;
+  SequenceNumber smallest_seqno = kMaxSequenceNumber;
 };
 
 // A batch of files.
@@ -290,6 +293,10 @@ class ExternalSstFileIngestionJob {
   // How many sequence numbers did we consume as part of the ingestion job?
   int ConsumedSequenceNumbersCount() const { return consumed_seqno_count_; }
 
+  SequenceNumber MaxAssignedSequenceNumber() const {
+    return max_assigned_seqno_;
+  }
+
  private:
   Status ResetTableReader(const std::string& external_file,
                           uint64_t new_file_number,
@@ -369,6 +376,11 @@ class ExternalSstFileIngestionJob {
   template <typename TWritableFile>
   Status SyncIngestedFile(TWritableFile* file);
 
+  // Helper function to obtain the smallest sequence number from a file
+  Status GetSmallestSeqnoFromFile(TableReader* table_reader, SuperVersion* sv,
+                                  IngestedFileInfo* file_to_ingest,
+                                  bool allow_data_in_errors);
+
   // Create equivalent `Compaction` objects to this file ingestion job
   // , which will be used to check range conflict with other ongoing
   // compactions.
@@ -396,6 +408,7 @@ class ExternalSstFileIngestionJob {
   VersionEdit edit_;
   uint64_t job_start_time_;
   int consumed_seqno_count_;
+  SequenceNumber max_assigned_seqno_{0};
   // Set in ExternalSstFileIngestionJob::Prepare(), if true all files are
   // ingested in L0
   bool files_overlap_{false};

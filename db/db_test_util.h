@@ -1280,6 +1280,8 @@ class DBTestBase : public testing::Test {
 
   int NumTableFilesAtLevel(int level, int cf = 0);
 
+  int NumTableFilesAtLevel(int level, ColumnFamilyHandle* column_family);
+
   double CompressionRatioAtLevel(int level, int cf = 0);
 
   int TotalTableFiles(int cf = 0, int levels = -1);
@@ -1288,6 +1290,8 @@ class DBTestBase : public testing::Test {
 
   // Return spread of files per level
   std::string FilesPerLevel(int cf = 0);
+
+  std::string FilesPerLevel(ColumnFamilyHandle* cfh);
 
   size_t CountFiles();
 
@@ -1319,6 +1323,8 @@ class DBTestBase : public testing::Test {
                   int cf);
 
   void MoveFilesToLevel(int level, int cf = 0);
+
+  void MoveFilesToLevel(int level, ColumnFamilyHandle* column_family);
 
   void DumpFileCounts(const char* label);
 

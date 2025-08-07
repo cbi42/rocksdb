@@ -9,6 +9,7 @@
 #include "db/db_impl/db_impl.h"
 
 #include <cstdint>
+#include <iostream>
 #ifdef OS_SOLARIS
 #include <alloca.h>
 #endif
@@ -6008,16 +6009,33 @@ Status DBImpl::IngestExternalFiles(
       // before LogAndApply.
       int consumed_seqno_count =
           ingestion_jobs[0].ConsumedSequenceNumbersCount();
+      SequenceNumber max_assigned_seqno =
+          ingestion_jobs[0].MaxAssignedSequenceNumber();
       for (size_t i = 1; i != num_cfs; ++i) {
         consumed_seqno_count =
             std::max(consumed_seqno_count,
                      ingestion_jobs[i].ConsumedSequenceNumbersCount());
+        max_assigned_seqno = std::max(
+            max_assigned_seqno, ingestion_jobs[i].MaxAssignedSequenceNumber());
       }
-      if (consumed_seqno_count > 0) {
+      // if (consumed_seqno_count > 0) {
+      //   const SequenceNumber last_seqno = versions_->LastSequence();
+      //   versions_->SetLastAllocatedSequence(last_seqno +
+      //   consumed_seqno_count); versions_->SetLastPublishedSequence(last_seqno
+      //   + consumed_seqno_count); versions_->SetLastSequence(last_seqno +
+      //   consumed_seqno_count);
+      // }
+      if (max_assigned_seqno > 0) {
         const SequenceNumber last_seqno = versions_->LastSequence();
-        versions_->SetLastAllocatedSequence(last_seqno + consumed_seqno_count);
-        versions_->SetLastPublishedSequence(last_seqno + consumed_seqno_count);
-        versions_->SetLastSequence(last_seqno + consumed_seqno_count);
+        // Actually may not be true
+        assert(max_assigned_seqno > last_seqno);
+        if (max_assigned_seqno > last_seqno) {
+          std::cout << " Updating last_seqno from " << last_seqno << " to "
+                    << max_assigned_seqno << std::endl;
+          versions_->SetLastAllocatedSequence(max_assigned_seqno);
+          versions_->SetLastPublishedSequence(max_assigned_seqno);
+          versions_->SetLastSequence(max_assigned_seqno);
+        }
       }
     }
 

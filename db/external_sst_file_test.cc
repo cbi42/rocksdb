@@ -4139,6 +4139,259 @@ TEST_P(IngestDBGeneratedFileTest2, NotOverlapWithDB) {
     }
   } while (ChangeOptions(kSkipPlainTable | kSkipFIFOCompaction));
 }
+
+// TODO:
+// 1. multiple files in different levels
+// 2. negative case where it overlaps with the DB
+// 3. across DB ingestion
+// 4. test online DDL case
+TEST_P(IngestDBGeneratedFileTest2, NonZeroSeqno) {
+  // Test ingestion of DB-generated SST files that contain non-zero sequence
+  // numbers. This test validates that files with non-zero sequence numbers can
+  // be successfully ingested when allow_db_generated_files is enabled and
+  // proper conditions are met.
+  IngestExternalFileOptions ingest_opts;
+  ingest_opts.allow_db_generated_files = true;
+  // Not supported
+  ingest_opts.snapshot_consistency = false;
+  // TODO: should be false, now to enable overlap ingestion
+  ingest_opts.allow_global_seqno = true;
+  ingest_opts.allow_blocking_flush = std::get<2>(GetParam());
+  // TODO: support this for overlapping ingestion
+  ingest_opts.fail_if_not_bottommost_level = false;
+  ingest_opts.link_files = std::get<4>(GetParam());
+  Random* rnd = Random::GetTLSInstance();
+
+  do {
+    SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+
+    Options options = CurrentOptions();
+    options.allow_concurrent_memtable_write =
+        false;  // Required for VectorRepFactory
+    CreateAndReopenWithCF(
+        {"to_ingest_single_level", "overlapped_cf", "to_ingest_multi_level"},
+        options);
+
+    std::vector<std::string> expected_values;
+    expected_values.resize(100);
+    // Phase 1: Setup target CF with non-overlapping base data
+    {
+      SCOPED_TRACE("Phase 1: Setting up target CF with base data");
+
+      // Will ingest keys [2, 98]
+      WriteOptions wo;
+      expected_values[0] = "base_val_0";
+      ASSERT_OK(db_->Put(wo, handles_[1], Key(0), expected_values[0]));
+      ASSERT_OK(db_->Flush({}, handles_[1]));
+      expected_values[99] = "base_val_99";
+      ASSERT_OK(db_->Put(wo, handles_[1], Key(99), expected_values[99]));
+
+      // Set up overlapping key
+      ASSERT_OK(db_->Put(wo, handles_[2], Key(50), rnd->RandomString(100)));
+    }
+
+    // TODO: use a parameter to indicate this is a temporary DB
+
+    // Phase 2: Create temporary CF to generate SST files with non-zero sequence
+    // numbers
+    ColumnFamilyHandle* temp_cfh;
+    std::vector<std::string> sst_file_paths;
+
+    {
+      SCOPED_TRACE(
+          "Phase 2: Creating SST files with non-zero sequence numbers");
+
+      Options temp_cf_opts;
+      temp_cf_opts.target_file_size_base =
+          4 << 10;  // Small files to create multiple SSTs
+      temp_cf_opts.num_levels = 7;
+      temp_cf_opts.disable_auto_compactions = true;  // Manually set up LSM
+
+      ASSERT_OK(db_->CreateColumnFamily(temp_cf_opts, "temp_cf", &temp_cfh));
+
+      // Generate data with a snapshot to ensure non-zero sequence numbers
+      const Snapshot* snapshot = db_->GetSnapshot();
+
+      WriteOptions wo;
+
+      for (int k = 1; k < 80; ++k) {
+        expected_values[k] = rnd->RandomString(500);
+        ASSERT_OK(db_->Put(wo, temp_cfh, Key(k), expected_values[k]));
+      }
+
+      // Compact to create final SST files while preserving sequence numbers
+      CompactRangeOptions cro;
+      cro.bottommost_level_compaction =
+          BottommostLevelCompaction::kForceOptimized;
+      ASSERT_OK(db_->CompactRange(cro, temp_cfh, nullptr, nullptr));
+      ASSERT_GT(NumTableFilesAtLevel(6, temp_cfh), 0);
+      std::cout << "LSM state: " << FilesPerLevel(temp_cfh) << std::endl;
+
+      for (int k = 80; k < 99; ++k) {
+        expected_values[k] = rnd->RandomString(500);
+        ASSERT_OK(db_->Put(wo, temp_cfh, Key(k), expected_values[k]));
+      }
+      ASSERT_OK(db_->Flush({}, temp_cfh));
+      // Do some overwrites, and overlap with previous L0 to avoid trivial move
+      for (int k = 70; k < 82; ++k) {
+        expected_values[k] = rnd->RandomString(500);
+        ASSERT_OK(db_->Put(wo, temp_cfh, Key(k), expected_values[k]));
+      }
+      ASSERT_OK(db_->Flush({}, temp_cfh));
+      MoveFilesToLevel(5, temp_cfh);
+      std::cout << "LSM state: " << FilesPerLevel(temp_cfh) << std::endl;
+      {
+        // Validate post-ingestion state
+        ColumnFamilyMetaData target_meta_after;
+        db_->GetColumnFamilyMetaData(temp_cfh, &target_meta_after);
+
+        // Print the CF LSM with each level with file name, largest and smallest
+        // key, and largest and smallest seqno
+        for (const auto& level_meta : target_meta_after.levels) {
+          std::cout << "Level " << level_meta.level << ":\n";
+          for (const auto& file_meta : level_meta.files) {
+            std::cout << "  File: " << file_meta.relative_filename << "\n";
+            std::cout << "    Smallest Key: " << file_meta.smallestkey << "\n";
+            std::cout << "    Largest Key: " << file_meta.largestkey << "\n";
+            std::cout << "    Smallest Seqno: " << file_meta.smallest_seqno
+                      << "\n";
+            std::cout << "    Largest Seqno: " << file_meta.largest_seqno
+                      << "\n";
+          }
+        }
+      }
+
+      ColumnFamilyMetaData cf_meta;
+      db_->GetColumnFamilyMetaData(temp_cfh, &cf_meta);
+      ASSERT_GE(cf_meta.file_count, 1) << "Should have at least one SST file";
+
+      // Collect SST file paths and validate they have non-zero sequence numbers
+      size_t total_files = 0;
+      for (auto level_meta = cf_meta.levels.rbegin();
+           level_meta != cf_meta.levels.rend(); ++level_meta) {
+        for (const auto& file_meta : level_meta->files) {
+          total_files++;
+
+          // Validate that files contain non-zero sequence numbers
+          ASSERT_GT(file_meta.largest_seqno, 0)
+              << "File " << file_meta.relative_filename
+              << " should have non-zero largest sequence number";
+
+          // Validate sequence number consistency
+          ASSERT_GE(file_meta.largest_seqno, file_meta.smallest_seqno)
+              << "Largest seqno should be >= smallest seqno";
+
+          sst_file_paths.emplace_back(file_meta.directory + "/" +
+                                      file_meta.relative_filename);
+        }
+      }
+
+      ASSERT_GT(total_files, 0) << "Should have found at least one SST file";
+      ASSERT_EQ(sst_file_paths.size(), total_files)
+          << "Should collect all SST file paths";
+
+      db_->ReleaseSnapshot(snapshot);
+    }
+
+    // Phase 3: Perform ingestion and validate results
+    {
+      SCOPED_TRACE("Phase 3: Ingesting files and validating results");
+
+      // Record initial state of target CF
+      ColumnFamilyMetaData target_meta_before;
+      db_->GetColumnFamilyMetaData(handles_[1], &target_meta_before);
+      size_t files_before = target_meta_before.file_count;
+
+      // Perform the ingestion
+      SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+      ASSERT_OK(
+          db_->IngestExternalFile(handles_[1], sst_file_paths, ingest_opts))
+          << "Ingestion should succeed with allow_db_generated_files=true";
+
+      // Validate post-ingestion state
+      ColumnFamilyMetaData target_meta_after;
+      db_->GetColumnFamilyMetaData(handles_[1], &target_meta_after);
+
+      // Print the CF LSM with each level with file name, largest and smallest
+      // key, and largest and smallest seqno
+      for (const auto& level_meta : target_meta_after.levels) {
+        std::cout << "Level " << level_meta.level << ":\n";
+        for (const auto& file_meta : level_meta.files) {
+          std::cout << "  File: " << file_meta.relative_filename << "\n";
+          std::cout << "    Smallest Key: " << file_meta.smallestkey << "\n";
+          std::cout << "    Largest Key: " << file_meta.largestkey << "\n";
+          std::cout << "    Smallest Seqno: " << file_meta.smallest_seqno
+                    << "\n";
+          std::cout << "    Largest Seqno: " << file_meta.largest_seqno << "\n";
+        }
+      }
+
+      // Should have more files after ingestion
+      ASSERT_GT(target_meta_after.file_count, files_before)
+          << "Target CF should have more files after ingestion";
+
+      // Validate that ingested files preserve their sequence numbers
+      size_t ingested_files_with_nonzero_seqno = 0;
+      for (const auto& level_meta : target_meta_after.levels) {
+        for (const auto& file_meta : level_meta.files) {
+          if (file_meta.largest_seqno > 0) {
+            ingested_files_with_nonzero_seqno++;
+          }
+        }
+      }
+
+      ASSERT_GT(ingested_files_with_nonzero_seqno, 0)
+          << "Should have at least one ingested file with non-zero sequence "
+             "numbers";
+
+      // CompactRangeOptions cro;
+      // cro.bottommost_level_compaction =
+      // BottommostLevelCompaction::kForceOptimized;
+      // ASSERT_OK(db_->CompactRange(cro, handles_[1], nullptr, nullptr));
+    }
+
+    // Phase 4: Comprehensive data validation
+    {
+      SCOPED_TRACE("Phase 4: Validating data integrity after ingestion");
+
+      ReadOptions ro;
+      std::string val;
+
+      for (int k = 0; k < 100; ++k) {
+        Status s = db_->Get(ro, handles_[1], Key(k), &val);
+        ASSERT_OK(s) << "Should be able to read ingested key " << Key(k);
+        ASSERT_EQ(val, expected_values[k])
+            << "Ingested value for key " << Key(k)
+            << " should match expected value";
+      }
+    }
+
+    // Phase 5: Test edge cases and configuration validation
+    {
+      SCOPED_TRACE("Phase 5: Testing configuration edge cases");
+
+      // Test that ingestion fails with allow_db_generated_files=false
+      IngestExternalFileOptions restrictive_opts = ingest_opts;
+      restrictive_opts.allow_db_generated_files = false;
+
+      std::cout << "option_config_ = " << std::to_string(option_config_)
+                << std::endl;
+      SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+      Status s = db_->IngestExternalFile(handles_[1], {sst_file_paths[0]},
+                                         restrictive_opts);
+      ASSERT_NOK(s) << "Should fail when allow_db_generated_files=false";
+      ASSERT_TRUE(s.ToString().find("External file version not found") !=
+                  std::string::npos)
+          << "Should get version validation error, got: " << s.ToString();
+    }
+
+    // Cleanup
+    ASSERT_OK(db_->DropColumnFamily(temp_cfh));
+    ASSERT_OK(db_->DestroyColumnFamilyHandle(temp_cfh));
+
+  } while (ChangeOptions(kSkipPlainTable | kSkipFIFOCompaction));
+}
+
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

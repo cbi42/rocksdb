@@ -2461,6 +2461,9 @@ struct IngestExternalFileOptions {
   // WARNING: Violating the sequence number ordering requirement will cause
   // LSM invariant violations and may lead to incorrect reads or data
   // corruption.
+  // Just allow overlap, use fail_if_not_bottommost as the safeguard
+  // TODO: provide an overlap mode, such that only when enabled, we allow
+  // overlap. Since overlap is a dangerous subcase.
   bool allow_db_generated_files = false;
 
   // Controls whether data and metadata blocks (e.g. index, filter) read during

@@ -1172,6 +1172,13 @@ int DBTestBase::NumTableFilesAtLevel(int level, int cf) {
   return atoi(property.c_str());
 }
 
+int DBTestBase::NumTableFilesAtLevel(int level, ColumnFamilyHandle* cfh) {
+  std::string property;
+  EXPECT_TRUE(db_->GetProperty(
+      cfh, "rocksdb.num-files-at-level" + std::to_string(level), &property));
+  return atoi(property.c_str());
+}
+
 double DBTestBase::CompressionRatioAtLevel(int level, int cf) {
   std::string property;
   if (cf == 0) {
@@ -1207,6 +1214,23 @@ std::string DBTestBase::FilesPerLevel(int cf) {
   size_t last_non_zero_offset = 0;
   for (int level = 0; level < num_levels; level++) {
     int f = NumTableFilesAtLevel(level, cf);
+    char buf[100];
+    snprintf(buf, sizeof(buf), "%s%d", (level ? "," : ""), f);
+    result += buf;
+    if (f > 0) {
+      last_non_zero_offset = result.size();
+    }
+  }
+  result.resize(last_non_zero_offset);
+  return result;
+}
+
+std::string DBTestBase::FilesPerLevel(ColumnFamilyHandle* cfh) {
+  int num_levels = db_->NumberLevels(cfh);
+  std::string result;
+  size_t last_non_zero_offset = 0;
+  for (int level = 0; level < num_levels; level++) {
+    int f = NumTableFilesAtLevel(level, cfh);
     char buf[100];
     snprintf(buf, sizeof(buf), "%s%d", (level ? "," : ""), f);
     result += buf;
@@ -1339,12 +1363,19 @@ void DBTestBase::FillLevels(const std::string& smallest,
 }
 
 void DBTestBase::MoveFilesToLevel(int level, int cf) {
+  MoveFilesToLevel(level, handles_[cf]);
+}
+
+void DBTestBase::MoveFilesToLevel(int level,
+                                  ColumnFamilyHandle* column_family) {
   for (int l = 0; l < level; ++l) {
-    if (cf > 0) {
-      EXPECT_OK(dbfull()->TEST_CompactRange(l, nullptr, nullptr, handles_[cf]));
-    } else {
-      EXPECT_OK(dbfull()->TEST_CompactRange(l, nullptr, nullptr));
-    }
+    EXPECT_OK(dbfull()->TEST_CompactRange(l, nullptr, nullptr, column_family));
+    // if (cf > 0) {
+    //   EXPECT_OK(dbfull()->TEST_CompactRange(l, nullptr, nullptr,
+    //   column_family));
+    // } else {
+    //   EXPECT_OK(dbfull()->TEST_CompactRange(l, nullptr, nullptr));
+    // }
   }
 }
 
