@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <memory>
+#include <sstream>
 
 #include "db/db_test_util.h"
 #include "db/dbformat.h"
@@ -4146,6 +4147,734 @@ TEST_P(IngestDBGeneratedFileTest2, NotOverlapWithDB) {
     }
   } while (ChangeOptions(kSkipPlainTable | kSkipFIFOCompaction));
 }
+
+TEST_P(IngestDBGeneratedFileTest2, NonZeroSeqno) {
+  // Test ingestion of DB-generated SST files that contain non-zero sequence
+  // numbers. This test validates that files with non-zero sequence numbers can
+  // be successfully ingested when allow_db_generated_files is enabled and
+  // proper conditions are met.
+  IngestExternalFileOptions ingest_opts;
+  ingest_opts.allow_db_generated_files = true;
+  // Not supported
+  ingest_opts.snapshot_consistency = false;
+  // TODO: should be false, now to enable overlap ingestion
+  ingest_opts.allow_global_seqno = true;
+  ingest_opts.allow_blocking_flush = std::get<2>(GetParam());
+  // TODO: support this for overlapping ingestion
+  ingest_opts.fail_if_not_bottommost_level = false;
+  ingest_opts.link_files = std::get<4>(GetParam());
+  Random* rnd = Random::GetTLSInstance();
+
+  do {
+    SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+
+    Options options = CurrentOptions();
+    options.allow_concurrent_memtable_write =
+        false;  // Required for VectorRepFactory
+    CreateAndReopenWithCF(
+        {"to_ingest_single_level", "overlapped_cf", "to_ingest_multi_level"},
+        options);
+
+    std::vector<std::string> expected_values;
+    expected_values.resize(100);
+    {
+      // Setup target CF with non-overlapping base data
+      // Will ingest keys [1, 98]
+      WriteOptions wo;
+      expected_values[0] = "base_val_0";
+      ASSERT_OK(db_->Put(wo, handles_[1], Key(0), expected_values[0]));
+      ASSERT_OK(db_->Flush({}, handles_[1]));
+      expected_values[99] = "base_val_99";
+      ASSERT_OK(db_->Put(wo, handles_[1], Key(99), expected_values[99]));
+
+      // Set up overlapping key
+      // TODO: test this DB
+      ASSERT_OK(db_->Put(wo, handles_[2], Key(50), rnd->RandomString(100)));
+    }
+
+
+
+    Options temp_cf_opts;
+    ColumnFamilyHandle* temp_cfh = nullptr;
+    DB* ingesting_db = nullptr;
+    std::string temp_db_name;
+    // Using a separate DB also validates that latest sequence number
+    // of db_ is updated after ingestion (to the max sequence number
+    // in ingested files).
+    const bool use_temp_db = 1;
+    // rnd->OneIn(2);
+    SCOPED_TRACE("use_temp_db: " + std::to_string(use_temp_db));
+
+
+
+    std::vector<std::string> sst_file_paths;
+    // TODO: optionally test multi-level vs single level
+    // Create temporary CF or DB to generate SST files with non-zero seqno
+    // optional L5: files in key range [70, 98]
+    // L6: files in key range [1, 79]
+    temp_cf_opts.target_file_size_base =
+        4 << 10;  // Small files to create multiple SSTs
+    temp_cf_opts.num_levels = 7;
+    temp_cf_opts.disable_auto_compactions = true;  // Manually set up LSM
+    temp_cf_opts.env = options.env;
+
+    if (use_temp_db) {
+      // Create temporary database
+      temp_cf_opts.create_if_missing = true;
+      temp_db_name = dbname_ + "/temp_db_" + std::to_string(rnd->Next());
+      ASSERT_OK(DB::Open(temp_cf_opts, temp_db_name, &ingesting_db));
+      temp_cfh = ingesting_db->DefaultColumnFamily();
+    } else {
+      // Create temporary column family
+      ingesting_db = db_;
+      ASSERT_OK(ingesting_db->CreateColumnFamily(temp_cf_opts, "temp_cf", &temp_cfh));
+    }
+
+    // Use snapshot to ensure non-zero sequence numbers
+    const Snapshot* snapshot = ingesting_db->GetSnapshot();
+    WriteOptions wo;
+
+    for (int k = 1; k < 99; ++k) {
+      expected_values[k] = rnd->RandomString(500);
+      ASSERT_OK(ingesting_db->Put(wo, temp_cfh, Key(k), expected_values[k]));
+    }
+    ASSERT_OK(ingesting_db->Flush({}, temp_cfh));
+    CompactRangeOptions cro;
+    cro.bottommost_level_compaction = BottommostLevelCompaction::kForceOptimized;
+    ASSERT_OK(ingesting_db->CompactRange(cro, temp_cfh, nullptr, nullptr));
+
+    // CompactRangeOptions cro;
+    // cro.bottommost_level_compaction =
+    //     BottommostLevelCompaction::kForceOptimized;
+    // ASSERT_OK(db_->CompactRange(cro, temp_cfh, nullptr, nullptr));
+    ASSERT_GT(NumTableFilesAtLevel(6, temp_cfh, ingesting_db), 1);
+    // ASSERT_GT(NumTableFilesAtLevel(6, temp_cfh), 0);
+    std::cout << "LSM state: " << FilesPerLevel(temp_cfh, ingesting_db) << std::endl;
+
+    const bool multi_level_ingestion = rnd->OneIn(2);
+    SCOPED_TRACE("Multi-level ingestion: " + std::to_string(multi_level_ingestion));
+    if (multi_level_ingestion) {
+      for (int k = 80; k < 99; ++k) {
+        expected_values[k] = rnd->RandomString(500);
+        ASSERT_OK(ingesting_db->Put(wo, temp_cfh, Key(k), expected_values[k]));
+        // if (use_temp_db) {
+        //   ASSERT_OK(temp_db->Put(wo, Key(k), expected_values[k]));
+        // } else {
+        //   ASSERT_OK(db_->Put(wo, temp_cfh, Key(k), expected_values[k]));
+        // }
+      }
+      ASSERT_OK(ingesting_db->Flush({}, temp_cfh));
+      // if (use_temp_db) {
+      //   ASSERT_OK(temp_db->Flush({}));
+      // } else {
+      //   ASSERT_OK(db_->Flush({}, temp_cfh));
+      // }
+      // Do some overwrites, and overlap with previous L0 to avoid trivial move
+      for (int k = 70; k < 82; ++k) {
+        expected_values[k] = rnd->RandomString(500);
+        ASSERT_OK(ingesting_db->Put(wo, temp_cfh, Key(k), expected_values[k]));
+        // if (use_temp_db) {
+        //   ASSERT_OK(temp_db->Put(wo, Key(k), expected_values[k]));
+        // } else {
+        //   ASSERT_OK(db_->Put(wo, temp_cfh, Key(k), expected_values[k]));
+        // }
+      }
+      ASSERT_OK(ingesting_db->Flush({}, temp_cfh));
+      MoveFilesToLevel(5, temp_cfh, ingesting_db);
+
+      // if (use_temp_db) {
+      //   ASSERT_OK(temp_db->Flush({}));
+      // } else {
+      //   ASSERT_OK(db_->Flush({}, temp_cfh));
+      // }
+      // MoveFilesToLevel(5, temp_cfh);
+      ASSERT_GT(NumTableFilesAtLevel(5, temp_cfh, ingesting_db), 0);
+      ASSERT_GT(NumTableFilesAtLevel(6, temp_cfh, ingesting_db), 0);
+    }
+    std::cout << "LSM state: " << FilesPerLevel(temp_cfh) << std::endl;
+    // {
+    //   // Validate post-ingestion state
+    //   ColumnFamilyMetaData target_meta_after;
+    //   db_->GetColumnFamilyMetaData(temp_cfh, &target_meta_after);
+
+    //   // Print the CF LSM with each level with file name, largest and smallest
+    //   // key, and largest and smallest seqno
+    //   for (const auto& level_meta : target_meta_after.levels) {
+    //     std::cout << "Level " << level_meta.level << ":\n";
+    //     for (const auto& file_meta : level_meta.files) {
+    //       std::cout << "  File: " << file_meta.relative_filename << "\n";
+    //       std::cout << "    Smallest Key: " << file_meta.smallestkey << "\n";
+    //       std::cout << "    Largest Key: " << file_meta.largestkey << "\n";
+    //       std::cout << "    Smallest Seqno: " << file_meta.smallest_seqno
+    //                 << "\n";
+    //       std::cout << "    Largest Seqno: " << file_meta.largest_seqno
+    //                 << "\n";
+    //     }
+    //   }
+    // }
+
+    ColumnFamilyMetaData cf_meta;
+    ingesting_db->GetColumnFamilyMetaData(temp_cfh, &cf_meta);
+
+    // if (use_temp_db) {
+    //   temp_db->GetColumnFamilyMetaData(&cf_meta);
+    // } else {
+    //   db_->GetColumnFamilyMetaData(temp_cfh, &cf_meta);
+    // }
+    // ASSERT_GE(cf_meta.file_count, 1) << "Should have at least one SST file";
+
+    // Collect SST file paths and validate they have non-zero sequence numbers
+    // Iterate in reverse in IngestExternalFiles expect files to be ordered from old to new
+    for (auto level_meta = cf_meta.levels.rbegin();
+          level_meta != cf_meta.levels.rend(); ++level_meta) {
+      for (const auto& file_meta : level_meta->files) {
+        // Validate that files contain non-zero sequence numbers
+        ASSERT_GT(file_meta.largest_seqno, 0)
+            << "File " << file_meta.relative_filename
+            << " should have non-zero largest sequence number";
+        ASSERT_GE(file_meta.largest_seqno, file_meta.smallest_seqno)
+            << "Largest seqno should be >= smallest seqno";
+        sst_file_paths.emplace_back(file_meta.directory + "/" +
+                                    file_meta.relative_filename);
+      }
+    }
+    ingesting_db->ReleaseSnapshot(snapshot);
+
+    // if (use_temp_db) {
+    //   temp_db->ReleaseSnapshot(snapshot);
+    // } else {
+    //   db_->ReleaseSnapshot(snapshot);
+    // }
+
+    {
+      // Perform ingestion and validate results
+
+      // Record initial state of target CF
+      ColumnFamilyMetaData target_meta_before;
+      db_->GetColumnFamilyMetaData(handles_[1], &target_meta_before);
+      size_t files_before = target_meta_before.file_count;
+
+      // Perform the ingestion
+      ASSERT_OK(db_->IngestExternalFile(handles_[1], sst_file_paths, ingest_opts));
+
+      {
+        // TO REMOVE
+        // Validate post-ingestion state
+        ColumnFamilyMetaData target_meta_after;
+        db_->GetColumnFamilyMetaData(handles_[1], &target_meta_after);
+
+        // Print the CF LSM with each level with file name, largest and smallest
+        // key, and largest and smallest seqno
+        for (const auto& level_meta : target_meta_after.levels) {
+          std::cout << "Level " << level_meta.level << ":\n";
+          for (const auto& file_meta : level_meta.files) {
+            std::cout << "  File: " << file_meta.relative_filename << "\n";
+            std::cout << "    Smallest Key: " << file_meta.smallestkey << "\n";
+            std::cout << "    Largest Key: " << file_meta.largestkey << "\n";
+            std::cout << "    Smallest Seqno: " << file_meta.smallest_seqno
+                      << "\n";
+            std::cout << "    Largest Seqno: " << file_meta.largest_seqno << "\n";
+          }
+        }
+
+        // Should have more files after ingestion
+        ASSERT_GT(target_meta_after.file_count, files_before)
+            << "Target CF should have more files after ingestion";
+
+        // Validate that ingested files preserve their sequence numbers
+        size_t ingested_files_with_nonzero_seqno = 0;
+        for (const auto& level_meta : target_meta_after.levels) {
+          for (const auto& file_meta : level_meta.files) {
+            if (file_meta.largest_seqno > 0) {
+              ingested_files_with_nonzero_seqno++;
+            }
+          }
+        }
+
+        ASSERT_GT(ingested_files_with_nonzero_seqno, 0)
+            << "Should have at least one ingested file with non-zero sequence "
+              "numbers";
+      }
+
+      // CompactRangeOptions cro;
+      // cro.bottommost_level_compaction =
+      // BottommostLevelCompaction::kForceOptimized;
+      // ASSERT_OK(db_->CompactRange(cro, handles_[1], nullptr, nullptr));
+
+      ReadOptions ro;
+      std::string val;
+
+      for (int k = 0; k < 100; ++k) {
+        Status s = db_->Get(ro, handles_[1], Key(k), &val);
+        EXPECT_OK(s) << "Should be able to read ingested key " << Key(k);
+        EXPECT_EQ(val, expected_values[k])
+            << "Ingested value for key " << Key(k)
+            << " should match expected value";
+      }
+    }
+
+    {
+      // Ingestion failure case
+
+      // Test that ingestion fails with allow_db_generated_files=false
+      IngestExternalFileOptions restrictive_opts = ingest_opts;
+      restrictive_opts.allow_db_generated_files = false;
+
+      std::cout << "option_config_ = " << std::to_string(option_config_)
+                << std::endl;
+      SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+      Status s = db_->IngestExternalFile(handles_[1], {sst_file_paths[0]},
+                                         restrictive_opts);
+      ASSERT_NOK(s);
+      ASSERT_TRUE(s.ToString().find("External file version not found") !=
+                  std::string::npos);
+
+      // Ingesting the same file should fail since it overlaps with existing data
+      s = db_->IngestExternalFile(handles_[1], {sst_file_paths[0]}, ingest_opts);
+      ASSERT_NOK(s);
+      ASSERT_TRUE(s.ToString().find("An ingested file is requires sequence number reassignment") != std::string::npos);
+      // std::cout << s.ToString();
+    }
+
+    // Cleanup
+    if (use_temp_db) {
+      ASSERT_OK(ingesting_db->Close());
+      delete ingesting_db;
+      ASSERT_OK(DestroyDB(temp_db_name, temp_cf_opts));
+    } else {
+      ASSERT_OK(db_->DropColumnFamily(temp_cfh));
+      ASSERT_OK(db_->DestroyColumnFamilyHandle(temp_cfh));
+    }
+  } while (ChangeOptions(kSkipPlainTable | kSkipFIFOCompaction));
+}
+
+// TEST_P(IngestDBGeneratedFileTest2, NonZeroSeqno) {
+//   // Use a separate column family to sort some data, generate multiple SST
+//   // files. Then ingest these files into another column family or DB. The data
+//   // to be ingested does not overlap with existing data.
+//   IngestExternalFileOptions ingest_opts;
+//   ingest_opts.allow_db_generated_files = true;
+//   ingest_opts.snapshot_consistency = std::get<0>(GetParam());
+//   ingest_opts.allow_global_seqno = std::get<1>(GetParam());
+//   ingest_opts.allow_blocking_flush = std::get<2>(GetParam());
+//   ingest_opts.fail_if_not_bottommost_level = std::get<3>(GetParam());
+//   ingest_opts.link_files = std::get<4>(GetParam());
+
+//   do {
+//     SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+//     Options options = CurrentOptions();
+//     // vector memtable for temp CF does not support concurrent write
+//     options.allow_concurrent_memtable_write = false;
+//     CreateAndReopenWithCF({"toto"}, options);
+
+//     // non-empty bottommost level
+//     WriteOptions wo;
+//     for (int k = 0; k < 50; ++k) {
+//       ASSERT_OK(db_->Put(wo, handles_[1], Key(k), "base_val_" + Key(k)));
+//     }
+//     ASSERT_OK(Flush());
+//     CompactRangeOptions cro;
+//     cro.bottommost_level_compaction =
+//         BottommostLevelCompaction::kForceOptimized;
+//     ASSERT_OK(db_->CompactRange(cro, handles_[1], nullptr, nullptr));
+//     // non-empty memtable
+//     for (int k = 50; k < 100; ++k) {
+//       ASSERT_OK(db_->Put(wo, handles_[1], Key(k), "base_val_" + Key(k)));
+//     }
+
+//     // load external data to sort, generate multiple files
+//     Options temp_cf_opts;
+//     ColumnFamilyHandle* temp_cfh;
+//     temp_cf_opts.target_file_size_base = 4 << 10;
+//     temp_cf_opts.memtable_factory.reset(new VectorRepFactory());
+//     temp_cf_opts.allow_concurrent_memtable_write = false;
+//     temp_cf_opts.compaction_style = kCompactionStyleUniversal;
+//     ASSERT_OK(db_->CreateColumnFamily(temp_cf_opts, "temp_cf", &temp_cfh));
+
+//     Random rnd(301);
+//     std::vector<std::string> expected_value;
+//     expected_value.resize(100);
+//     // Out of order insertion of keys from 100 to 199.
+//     for (int k = 99; k >= 0; --k) {
+//       expected_value[k] = rnd.RandomString(200);
+//       ASSERT_OK(db_->Put(wo, temp_cfh, Key(k + 100), expected_value[k]));
+//     }
+//     ASSERT_OK(db_->CompactRange(cro, temp_cfh, nullptr, nullptr));
+//     std::vector<std::string> sst_file_paths;
+//     ColumnFamilyMetaData cf_meta;
+//     db_->GetColumnFamilyMetaData(temp_cfh, &cf_meta);
+//     ASSERT_GT(cf_meta.file_count, 1);
+//     for (const auto& level_meta : cf_meta.levels) {
+//       if (level_meta.level + 1 < temp_cf_opts.num_levels) {
+//         ASSERT_EQ(0, level_meta.files.size());
+//       } else {
+//         ASSERT_GT(level_meta.files.size(), 1);
+//         for (const auto& meta : level_meta.files) {
+//           ASSERT_EQ(0, meta.largest_seqno);
+//           sst_file_paths.emplace_back(meta.directory + "/" +
+//                                       meta.relative_filename);
+//         }
+//       }
+//     }
+
+//     ASSERT_OK(
+//         db_->IngestExternalFile(handles_[1], sst_file_paths, ingest_opts));
+//     // Verify state of the CF1
+//     ReadOptions ro;
+//     std::string val;
+//     for (int k = 0; k < 100; ++k) {
+//       ASSERT_OK(db_->Get(ro, handles_[1], Key(k), &val));
+//       ASSERT_EQ(val, "base_val_" + Key(k));
+//       ASSERT_OK(db_->Get(ro, handles_[1], Key(100 + k), &val));
+//       ASSERT_EQ(val, expected_value[k]);
+//     }
+
+//     // Ingest into another DB.
+//     if (!encrypted_env_) {
+//       // Ingestion between encrypted env and non-encrypted env won't work.
+//       std::string db2_path = test::PerThreadDBPath("DB2");
+//       Options db2_options;
+//       db2_options.create_if_missing = true;
+//       DB* db2 = nullptr;
+//       ASSERT_OK(DB::Open(db2_options, db2_path, &db2));
+//       // Write some base data.
+//       expected_value.emplace_back(rnd.RandomString(100));
+//       ASSERT_OK(db2->Put(WriteOptions(), Key(200), expected_value.back()));
+//       ASSERT_OK(db2->CompactRange(cro, nullptr, nullptr));
+//       expected_value.emplace_back(rnd.RandomString(100));
+//       ASSERT_OK(db2->Put(WriteOptions(), Key(201), expected_value.back()));
+
+//       ASSERT_OK(db2->IngestExternalFile({sst_file_paths}, ingest_opts));
+//       {
+//         std::unique_ptr<Iterator> iter{db2->NewIterator(ReadOptions())};
+//         iter->SeekToFirst();
+//         // The DB should have keys 100-199 from ingested files, and keys 200 and
+//         // 201 from itself.
+//         for (int k = 100; k <= 201; ++k, iter->Next()) {
+//           ASSERT_TRUE(iter->Valid());
+//           ASSERT_EQ(iter->key(), Key(k));
+//           ASSERT_EQ(iter->value(), expected_value[k - 100]);
+//         }
+//         ASSERT_FALSE(iter->Valid());
+//         ASSERT_OK(iter->status());
+//       }
+
+//       // Dropping the original CF should not affect db2, reopening it should not
+//       // miss SST files.
+//       ASSERT_OK(db_->DropColumnFamily(temp_cfh));
+//       ASSERT_OK(db_->DestroyColumnFamilyHandle(temp_cfh));
+//       ASSERT_OK(db2->Close());
+//       delete db2;
+//       ASSERT_OK(DB::Open(db2_options, db2_path, &db2));
+//       ASSERT_OK(db2->Close());
+//       delete db2;
+//       ASSERT_OK(DestroyDB(db2_path, db2_options));
+//     } else {
+//       ASSERT_OK(db_->DropColumnFamily(temp_cfh));
+//       ASSERT_OK(db_->DestroyColumnFamilyHandle(temp_cfh));
+//     }
+//   } while (ChangeOptions(kSkipPlainTable | kSkipFIFOCompaction));
+// }
+
+std::string GenSecondaryKey(const std::string& pk, const std::string& val) {
+      return "index_" + val + "_" + pk;
+    };
+
+TEST_P(IngestDBGeneratedFileTest2, ZeroAndNonZeroSeqno) {
+  // Test ingestion of SST files with both zero and non-zero sequence numbers.
+  // Generate data using two different CFs (or DBs):
+  // 1. One CF with allow_ingest_behind enabled to preserve non-zero seqno
+  // 2. Another CF with everything compacted to have zero seqno
+  // Then ingest both types of files into a target CF.
+
+  IngestExternalFileOptions ingest_opts;
+  ingest_opts.allow_db_generated_files = true;
+  ingest_opts.snapshot_consistency = false;
+  // TODO: fix logic to set this to false
+  ingest_opts.allow_global_seqno = true;
+  ingest_opts.allow_blocking_flush = std::get<2>(GetParam());
+  ingest_opts.fail_if_not_bottommost_level = false;
+  ingest_opts.link_files = std::get<4>(GetParam());
+
+  Random* rnd = Random::GetTLSInstance();
+
+  do {
+    SCOPED_TRACE("option_config_ = " + std::to_string(option_config_));
+    Options options = CurrentOptions();
+    options.allow_concurrent_memtable_write = false;
+    // more flushes and more sst files
+    options.write_buffer_size = 1 << 10;  // 1KB - very small to force multiple flushes
+    options.target_file_size_base = 1 << 10;  // 1KB - very small to force multiple files
+    options.max_bytes_for_level_base = 2 << 10;  // 2KB - small to trigger compaction
+    options.max_bytes_for_level_multiplier = 2;
+    options.level0_file_num_compaction_trigger = 2;  // Trigger compaction with just 2 L0 files
+    options.level_compaction_dynamic_level_bytes  = true;
+    DestroyAndReopen(options);
+    CreateAndReopenWithCF({"target_cf"}, options);
+    auto* target_cfh = handles_[1];
+
+    // Create catch up CF
+    Options catch_up_cf_opts = options;
+    catch_up_cf_opts.write_buffer_size = 1 << 10;
+    catch_up_cf_opts.target_file_size_base = 1 << 10;
+    catch_up_cf_opts.memtable_factory.reset(new VectorRepFactory());
+    catch_up_cf_opts.compaction_style = kCompactionStyleUniversal;
+    catch_up_cf_opts.cf_allow_ingest_behind = true;  // This preserves non-zero seqno
+    catch_up_cf_opts.num_levels = 3;
+    ColumnFamilyHandle* catch_up_writes_cfh;
+    ASSERT_OK(db_->CreateColumnFamily(catch_up_cf_opts, "catch_up_writes_cf",
+                                      &catch_up_writes_cfh));
+
+
+
+    // Expected value and key
+    std::map<std::string, std::string> expected;
+    expected.clear();
+
+    // Debug information collection (only printed on failure)
+    std::stringstream debug_info;
+    debug_info << "=== Debug Information ===\n";
+
+    // Setup base data in target CF
+    WriteOptions wo;
+    for (int k = 0; k < 100; ++k) {
+      // Use randomly chosen values from integers 0-19 instead of unique per key
+      int random_val = rnd->Uniform(20);  // 0-19 inclusive
+      expected[Key(k)] = std::to_string(random_val);
+      ASSERT_OK(db_->Put(wo, target_cfh, Key(k), expected[Key(k)]));
+
+      // Force flush every 20 keys to create multiple SST files
+      if ((k + 1) % 20 == 0) {
+        ASSERT_OK(db_->Flush({}, target_cfh));
+        debug_info << "After flush " << ((k + 1) / 20) << ", LSM state: "
+                   << FilesPerLevel(target_cfh) << "\n";
+      }
+    }
+
+    // Final flush for any remaining data
+    ASSERT_OK(db_->Flush({}, target_cfh));
+    debug_info << "After final flush, LSM state: " << FilesPerLevel(target_cfh) << "\n";
+
+    // Wait for compaction to complete
+    ASSERT_OK(db_->WaitForCompact({}));
+    debug_info << "After compaction, LSM state of target cf: " << FilesPerLevel(target_cfh) << "\n";
+
+    // Base data from snapshot
+    std::vector<std::string> sst_file_paths_zero_seqno;
+    // Live writes after snapshot
+    std::vector<std::string> sst_file_paths_nonzero_seqno;
+
+    // Temp DB for snapshot data
+    Options temp_db_opts;
+    temp_db_opts.create_if_missing = true;
+    temp_db_opts.target_file_size_base = 1 << 10;
+    temp_db_opts.write_buffer_size = 1 << 10;
+    temp_db_opts.memtable_factory.reset(new VectorRepFactory());
+    temp_db_opts.allow_concurrent_memtable_write = false;
+    temp_db_opts.compaction_style = kCompactionStyleUniversal;
+    temp_db_opts.env = env_;
+    temp_db_opts.num_levels = 7;
+
+    std::string temp_db_name = dbname_ + "/temp_db_" + std::to_string(rnd->Next());
+    DB* temp_db = nullptr;
+    ASSERT_OK(DB::Open(temp_db_opts, temp_db_name, &temp_db));
+
+    const Snapshot* snapshot = db_->GetSnapshot();
+    ReadOptions ro;
+    ro.snapshot = snapshot;
+    std::unique_ptr<Iterator> iter{db_->NewIterator(ro, target_cfh)};
+    for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+      std::string key = iter->key().ToString();
+      std::string value = iter->value().ToString();
+      // Generate new key for temp_db by appending "_temp" to the original key
+      std::string sk = GenSecondaryKey(key, value);
+      // Insert the data into temp_db with the new key
+      ASSERT_OK(temp_db->Put(WriteOptions(), sk, ""));
+      expected[sk] = "";
+      debug_info << "Snapshot data: " << sk << " -> \n";
+    }
+    ASSERT_OK(iter->status());
+
+
+    // Do some catch up writes into base DB
+    for (int i = 0; i < 10; ++i) {
+      WriteBatch wb;
+      for (int j = 0; j < 5; ++j) {
+        std::string key = Key(rnd->Uniform(100));
+        std::string old_val = expected[key];
+        // Use randomly chosen values from integers 0-19 instead of unique per key
+        int random_val = rnd->Uniform(20);  // 0-19 inclusive
+        std::string new_val = std::to_string(random_val);
+        std::string old_index_key = GenSecondaryKey(key, old_val);
+        std::string new_index_key = GenSecondaryKey(key, new_val);
+        ASSERT_OK(wb.SingleDelete(catch_up_writes_cfh, old_index_key));
+        ASSERT_OK(wb.Put(catch_up_writes_cfh, new_index_key, ""));
+        ASSERT_OK(wb.Put(target_cfh, key, new_val));
+        expected[key] = new_val;
+        expected.erase(old_index_key);
+        expected[new_index_key] = "";
+
+        debug_info << "Catch-up write: SD " << old_index_key << "\n";
+        debug_info << "Catch-up write: " << key << " -> " << new_val << "\n";
+        debug_info << "Catch-up write: " << new_index_key << " -> \n";
+      }
+      ASSERT_OK(db_->Write(wo, &wb));
+      if (rnd->OneIn(3)) {
+        ASSERT_OK(db_->Flush({}, catch_up_writes_cfh));
+      }
+    }
+
+
+    iter.reset();
+    db_->ReleaseSnapshot(snapshot);
+    // Compact temp_db to ensure zero sequence numbers
+    CompactRangeOptions cro;
+    cro.bottommost_level_compaction = BottommostLevelCompaction::kForceOptimized;
+    ASSERT_OK(temp_db->CompactRange(cro, nullptr, nullptr));
+    // delete temp_db;
+
+    // Collect SST file paths with zero sequence numbers
+    temp_db->DisableFileDeletions();
+    ColumnFamilyMetaData cf_meta_temp_db;
+    temp_db->GetColumnFamilyMetaData(&cf_meta_temp_db);
+    for (const auto& level_meta : cf_meta_temp_db.levels) {
+      if (level_meta.level == 6) {  // Check only Level 6
+        for (const auto& file_meta : level_meta.files) {
+          // Verify files have zero sequence numbers
+          ASSERT_EQ(0, file_meta.largest_seqno)
+              << "File " << file_meta.relative_filename
+              << " should have zero sequence number";
+          sst_file_paths_zero_seqno.emplace_back(file_meta.directory + "/" +
+                                                  file_meta.relative_filename);
+        }
+      } else {
+        ASSERT_EQ(0, level_meta.files.size());
+      }
+    }
+
+
+
+
+
+    // Flush remaining data in memtable
+    ASSERT_OK(db_->Flush({}, catch_up_writes_cfh));
+      // Collect SST file paths with non-zero sequence numbers
+      ColumnFamilyMetaData catch_up_cf_meta;
+      db_->DisableFileDeletions();
+      db_->GetColumnFamilyMetaData(catch_up_writes_cfh, &catch_up_cf_meta);
+
+      for (auto level_meta = catch_up_cf_meta.levels.rbegin();
+           level_meta != catch_up_cf_meta.levels.rend(); ++level_meta) {
+        for (const auto& file_meta : level_meta->files) {
+          sst_file_paths_nonzero_seqno.emplace_back(file_meta.directory + "/" +
+                                                    file_meta.relative_filename);
+          ASSERT_GT(file_meta.smallest_seqno, 0);
+        }
+        if (level_meta->level == 2) {
+          ASSERT_EQ(level_meta->files.size(), 0);
+        }
+      }
+
+    // Part 3: Ingest both types of files into the target CF
+    ASSERT_GT(sst_file_paths_zero_seqno.size(), 0);
+    ASSERT_GT(sst_file_paths_nonzero_seqno.size(), 0);
+
+    // Combine all SST file paths
+    // Should be from old to new
+    std::vector<std::string> all_sst_files;
+    all_sst_files.insert(all_sst_files.end(),
+                         sst_file_paths_zero_seqno.begin(),
+                         sst_file_paths_zero_seqno.end());
+    all_sst_files.insert(all_sst_files.end(),
+                         sst_file_paths_nonzero_seqno.begin(),
+                         sst_file_paths_nonzero_seqno.end());
+
+    // Perform the ingestion
+    ASSERT_OK(db_->IngestExternalFile(target_cfh, all_sst_files, ingest_opts));
+
+    // Part 4: Verify the ingested data
+    debug_info << "Expected entries count: " << expected.size() << "\n";
+    debug_info << "Zero seqno files: " << sst_file_paths_zero_seqno.size() << "\n";
+    debug_info << "Non-zero seqno files: " << sst_file_paths_nonzero_seqno.size() << "\n";
+
+    // Verify the ingested data using an iterator
+    ReadOptions read_opts;
+    read_opts.total_order_seek = true;
+    iter.reset(db_->NewIterator(read_opts, target_cfh));
+    iter->SeekToFirst();
+
+    bool verification_failed = false;
+    std::stringstream failure_info;
+
+    for (const auto& kv : expected) {
+      if (!iter->Valid()) {
+        verification_failed = true;
+        failure_info << "Iterator not valid at expected key: " << kv.first << "\n";
+        break;
+      }
+
+      if (iter->key().ToString() != kv.first) {
+        verification_failed = true;
+        failure_info << "Key mismatch: expected " << kv.first
+                    << ", got " << iter->key().ToString() << "\n";
+        break;
+      }
+
+      if (iter->value().ToString() != kv.second) {
+        verification_failed = true;
+        failure_info << "Value mismatch at key " << kv.first
+                    << ": expected " << kv.second
+                    << ", got " << iter->value().ToString() << "\n";
+        break;
+      }
+
+      iter->Next();
+    }
+
+    if (iter->Valid()) {
+      verification_failed = true;
+      failure_info << "Iterator still valid after processing all expected entries\n";
+      failure_info << "Remaining key: " << iter->key().ToString() << "\n";
+    }
+
+    if (!iter->status().ok()) {
+      verification_failed = true;
+      failure_info << "Iterator status error: " << iter->status().ToString() << "\n";
+    }
+
+    // Print debug info only if verification failed
+    if (verification_failed) {
+      std::cout << debug_info.str() << std::endl;
+      std::cout << "=== Verification Failure Details ===\n" << failure_info.str() << std::endl;
+    }
+    ASSERT_FALSE(verification_failed);
+
+    // Now do the actual assertions that will fail the test
+    iter.reset(db_->NewIterator(read_opts, target_cfh));
+    iter->SeekToFirst();
+    for (const auto& kv : expected) {
+      ASSERT_TRUE(iter->Valid()) << "Iterator not valid at key: " << kv.first;
+      EXPECT_EQ(iter->key().ToString(), kv.first);
+      EXPECT_EQ(iter->value().ToString(), kv.second) << "at key " << kv.first;
+      iter->Next();
+    }
+    ASSERT_FALSE(iter->Valid()) << "Iterator still valid after all expected entries";
+    ASSERT_OK(iter->status());
+
+    db_->EnableFileDeletions();
+    temp_db->EnableFileDeletions();
+
+    ASSERT_OK(db_->DropColumnFamily(catch_up_writes_cfh));
+    ASSERT_OK(db_->DestroyColumnFamilyHandle(catch_up_writes_cfh));
+
+    ASSERT_OK(temp_db->Close());
+    delete temp_db;
+    ASSERT_OK(DestroyDB(temp_db_name, temp_db_opts));
+  }  while (ChangeOptions(kSkipPlainTable | kSkipFIFOCompaction));
+  //
+}
+
+
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
