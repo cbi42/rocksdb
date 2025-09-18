@@ -1047,6 +1047,11 @@ bool BlockBasedTableIterator::SeekMultiScan(const Slice* target) {
     // Unexpected seek key
     multi_scan_.reset();
   } else {
+    // Unpin blocks from all previous scan ranges when moving to a new scan
+    if (multi_scan_->next_scan_idx > 0) {
+      UnpinPreviousScanBlocks(multi_scan_->next_scan_idx);
+    }
+
     auto [cur_scan_start_idx, cur_scan_end_idx] =
         multi_scan_->block_index_ranges_per_scan[multi_scan_->next_scan_idx];
     // We should have the data block already loaded
@@ -1089,6 +1094,31 @@ bool BlockBasedTableIterator::SeekMultiScan(const Slice* target) {
   assert(!is_index_at_curr_block_);
   assert(!block_iter_points_to_real_block_);
   return false;
+}
+
+void BlockBasedTableIterator::UnpinPreviousScanBlocks(size_t current_scan_idx) {
+  assert(multi_scan_);
+
+  if (current_scan_idx == 0) return;
+
+  // Get block ranges for previous and current scan ranges
+  size_t prev_scan_idx = current_scan_idx - 1;
+  auto [prev_start_block_idx, prev_end_block_idx] =
+      multi_scan_->block_index_ranges_per_scan[prev_scan_idx];
+  auto [curr_start_block_idx, curr_end_block_idx] =
+      multi_scan_->block_index_ranges_per_scan[current_scan_idx];
+
+  // Only unpin blocks that are in the previous range but NOT in the current range
+  for (size_t block_idx = prev_start_block_idx; block_idx < prev_end_block_idx; ++block_idx) {
+    // Skip blocks that are also needed for the current scan range
+    if (block_idx >= curr_start_block_idx && block_idx < curr_end_block_idx) {
+      continue;
+    }
+
+    if (!multi_scan_->pinned_data_blocks[block_idx].IsEmpty()) {
+      multi_scan_->pinned_data_blocks[block_idx].Reset();
+    }
+  }
 }
 
 void BlockBasedTableIterator::FindBlockForwardInMultiScan() {

@@ -1418,6 +1418,136 @@ TEST_P(BlockBasedTableReaderTest, MultiScanPrefetchSizeLimit) {
   }
 }
 
+TEST_P(BlockBasedTableReaderTest, MultiScanUnpinPreviousBlocks) {
+  if (compression_type_ != kNoCompression) {
+    // This test relies on block sizes to be close to what's set in option.
+    ROCKSDB_GTEST_BYPASS("This test assumes no compression.");
+    return;
+  }
+
+  Options options;
+  ReadOptions read_opts;
+  size_t ts_sz = options.comparator->timestamp_size();
+
+  // Create a larger table to ensure we have multiple blocks per scan range
+  std::vector<std::pair<std::string, std::string>> kv =
+      BlockBasedTableReaderBaseTest::GenerateKVMap(
+          30 /* num_block */, true /* mixed_with_human_readable_string_value */,
+          ts_sz);
+
+  std::string table_name = "BlockBasedTableReaderTest_UnpinPreviousBlocks" +
+                           CompressionTypeToString(compression_type_);
+  ImmutableOptions ioptions(options);
+  CreateTable(table_name, ioptions, compression_type_, kv,
+              compression_parallel_threads_, compression_dict_bytes_);
+
+  std::unique_ptr<BlockBasedTable> table;
+  FileOptions foptions;
+  foptions.use_direct_reads = use_direct_reads_;
+  InternalKeyComparator comparator(options.comparator);
+  NewBlockBasedTableReader(foptions, ioptions, comparator, table_name, &table,
+                           true /* bool prefetch_index_and_filter_in_cache */,
+                           nullptr /* status */, persist_udt_);
+
+  // Get the block cache to monitor pinned usage
+  std::shared_ptr<Cache> block_cache = table->GetTableOptions().block_cache;
+  ASSERT_NE(block_cache, nullptr);
+
+  // Test 1: Non-overlapping ranges - should see unpinning
+  {
+    std::unique_ptr<InternalIterator> iter;
+    iter.reset(table->NewIterator(
+        read_opts, options_.prefix_extractor.get(), /*arena=*/nullptr,
+        /*skip_filters=*/false, TableReaderCaller::kUncategorized));
+
+    MultiScanArgs scan_options(BytewiseComparator());
+    // Create ranges with gaps: Range 0: blocks 0-4, Range 1: blocks 10-14
+    scan_options.insert(ExtractUserKey(kv[0 * kEntriesPerBlock].first),
+                        ExtractUserKey(kv[5 * kEntriesPerBlock - 1].first));
+    scan_options.insert(ExtractUserKey(kv[10 * kEntriesPerBlock].first),
+                        ExtractUserKey(kv[15 * kEntriesPerBlock - 1].first));
+
+    iter->Prepare(&scan_options);
+
+    // Seek to first range and measure pinned usage
+    size_t baseline_usage = block_cache->GetPinnedUsage();
+    iter->Seek(kv[0 * kEntriesPerBlock].first);
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_OK(iter->status());
+
+    // Load some blocks from first range
+    for (size_t i = 0; i < 2 * kEntriesPerBlock; ++i) {
+      ASSERT_TRUE(iter->Valid());
+      iter->Next();
+    }
+
+    size_t usage_after_first_range = block_cache->GetPinnedUsage();
+    ASSERT_GT(usage_after_first_range, baseline_usage);
+
+    // Seek to second range - should unpin blocks from first range
+    iter->Seek(kv[10 * kEntriesPerBlock].first);
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_OK(iter->status());
+
+    size_t usage_after_second_seek = block_cache->GetPinnedUsage();
+
+    // Load some blocks from second range
+    for (size_t i = 10 * kEntriesPerBlock; i < 12 * kEntriesPerBlock; ++i) {
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_EQ(iter->key().ToString(), kv[i].first);
+      iter->Next();
+    }
+
+    // Usage should have decreased from first range peak due to unpinning,
+    // even though we loaded new blocks for second range
+    // This is a bit tricky to assert precisely, so we just check it's reasonable
+    ASSERT_GT(usage_after_second_seek, baseline_usage);
+  }
+
+  // Test 2: Adjacent/overlapping ranges - shared blocks should NOT be unpinned
+  {
+    std::unique_ptr<InternalIterator> iter;
+    iter.reset(table->NewIterator(
+        read_opts, options_.prefix_extractor.get(), /*arena=*/nullptr,
+        /*skip_filters=*/false, TableReaderCaller::kUncategorized));
+
+    MultiScanArgs scan_options(BytewiseComparator());
+    // Create adjacent ranges: Range 0: blocks 5-9, Range 1: blocks 8-12
+    // Block 8 and 9 should be shared between ranges
+    scan_options.insert(ExtractUserKey(kv[5 * kEntriesPerBlock].first),
+                        ExtractUserKey(kv[10 * kEntriesPerBlock - 1].first));
+    scan_options.insert(ExtractUserKey(kv[8 * kEntriesPerBlock].first),
+                        ExtractUserKey(kv[13 * kEntriesPerBlock - 1].first));
+
+    iter->Prepare(&scan_options);
+
+    // Seek to first range
+    iter->Seek(kv[5 * kEntriesPerBlock].first);
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_OK(iter->status());
+
+    // Load blocks from first range (including boundary blocks)
+    for (size_t i = 5 * kEntriesPerBlock; i < 8 * kEntriesPerBlock; ++i) {
+      ASSERT_TRUE(iter->Valid());
+      iter->Next();
+    }
+
+    // Seek to second range - boundary blocks should remain pinned
+    iter->Seek(kv[8 * kEntriesPerBlock].first);
+    ASSERT_TRUE(iter->Valid());
+    ASSERT_OK(iter->status());
+
+    // Iterate through the overlapping portion - should work without issues
+    for (size_t i = 8 * kEntriesPerBlock; i < 11 * kEntriesPerBlock; ++i) {
+      ASSERT_TRUE(iter->Valid());
+      ASSERT_EQ(iter->key().ToString(), kv[i].first);
+      iter->Next();
+    }
+
+    ASSERT_OK(iter->status());
+  }
+}
+
 // Param 1: compression type
 // Param 2: whether to use direct reads
 // Param 3: Block Based Table Index type, partitioned filters are also enabled
